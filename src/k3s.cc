@@ -20,9 +20,9 @@
 namespace puu {
 namespace {
 
-constexpr char kEnvironment[] = "puu-cluster.env";
+constexpr char kEnvironment[] = "cluster.env";
 constexpr char kServiceEnvironment[] = "k3s.service.env";
-constexpr char kEnvironmentTarget[] = "/etc/rancher/k3s/puu-cluster.env";
+constexpr char kEnvironmentTarget[] = "/etc/rancher/k3s/cluster.env";
 
 bool ValidEncoding(std::string_view text, bool multiline = false) {
   for (size_t i = 0; i < text.size();) {
@@ -299,7 +299,7 @@ StatusOr<std::string> TemporaryName() {
   std::array<uint8_t, 16> random{};
   PUU_RETURN_IF_ERROR(RandomBytes(random));
   constexpr char hex[] = "0123456789abcdef";
-  std::string name = ".puu-k3s-";
+  std::string name = ".k3s-";
   for (const uint8_t byte : random) {
     name.push_back(hex[byte >> 4]);
     name.push_back(hex[byte & 15]);

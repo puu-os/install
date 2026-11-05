@@ -155,7 +155,8 @@ StatusOr<std::filesystem::path> InDeployment(
 
 Status RunChrootedHelper(const Runner& runner,
                          const std::filesystem::path& helper,
-                         std::string heartbeat) {
+                         std::string heartbeat, double progress_base,
+                         double progress_span) {
   PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
                        DeploymentRoot(kTargetMount));
   PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
@@ -180,33 +181,95 @@ Status RunChrootedHelper(const Runner& runner,
   Command command(helper.string());
   command.Chroot(deployment)
       .Heartbeat(kHeartbeatInterval, std::move(heartbeat))
-      .Track(&progress,
-             [&runner](double fraction) { runner.ReportProgress(fraction); });
+      .Track(
+          &progress, [&runner, progress_base, progress_span](double fraction) {
+            runner.ReportProgress(
+                progress_base + progress_span * std::clamp(fraction, 0.0, 1.0));
+          });
   return command.Run();
 }
 
-Status SeedStore(const Runner& runner, const std::filesystem::path& live_store,
-                 const std::filesystem::path& sync_helper,
-                 const std::filesystem::path& relative_target,
-                 std::string_view what) {
-  if (IsDirectory(live_store)) {
+StatusOr<std::vector<std::string>> ParseManifestRefs(
+    const std::filesystem::path& manifest) {
+  if (!Exists(manifest)) {
+    return std::vector<std::string>();
+  }
+
+  PUU_ASSIGN_OR_RETURN(const std::string content, ReadFile(manifest));
+  std::vector<std::string> refs;
+  std::string_view remaining(content);
+  while (!remaining.empty()) {
+    const size_t newline = remaining.find('\n');
+    std::string_view line = remaining.substr(0, newline);
+    remaining = newline == std::string_view::npos
+                    ? std::string_view()
+                    : remaining.substr(newline + 1);
+    const size_t comment = line.find('#');
+    if (comment != std::string_view::npos) {
+      line = line.substr(0, comment);
+    }
+    const std::string_view trimmed = Trim(line);
+    if (!trimmed.empty()) {
+      refs.emplace_back(trimmed);
+    }
+  }
+  return refs;
+}
+
+Status SeedStore(const Runner& runner, const SeedConfig& seed,
+                 double progress_base, double progress_span) {
+  const std::string_view name = seed.name.Value();
+  if (seed.live_store.has_value() && IsDirectory(*seed.live_store)) {
     PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
-    PUU_RETURN_IF_ERROR(CopyTree(live_store, state / relative_target));
+    PUU_RETURN_IF_ERROR(
+        CopyTree(*seed.live_store, state / seed.target.relative_path()));
     InstallationLogger()->info("{}: copied the store from the live image",
-                               what);
+                               name);
+    return absl::OkStatus();
+  }
+  if (seed.manifest_path.has_value()) {
+    PUU_ASSIGN_OR_RETURN(const std::filesystem::path manifest,
+                         InDeployment(*seed.manifest_path));
+    PUU_ASSIGN_OR_RETURN(const std::vector<std::string> refs,
+                         ParseManifestRefs(manifest));
+    if (refs.empty()) {
+      InstallationLogger()->info("{}: no refs listed in {}", name,
+                                 seed.manifest_path->string());
+      return absl::OkStatus();
+    }
+  }
+  if (!seed.sync_helper.has_value()) {
+    InstallationLogger()->info("{}: nothing to pre-stage", name);
     return absl::OkStatus();
   }
   PUU_ASSIGN_OR_RETURN(const std::filesystem::path helper,
-                       InDeployment(sync_helper));
+                       InDeployment(*seed.sync_helper));
   if (!IsRegularFile(helper)) {
-    InstallationLogger()->info("{}: nothing to pre-stage", what);
+    InstallationLogger()->info("{}: nothing to pre-stage", name);
     return absl::OkStatus();
   }
-  InstallationLogger()->info("{}: running {}", what, sync_helper.string());
+  InstallationLogger()->info("{}: running {}", name,
+                             seed.sync_helper->string());
   PUU_RETURN_IF_ERROR(RunChrootedHelper(
-      runner, sync_helper,
-      fmt::format("{} pre-seed still running; downloading content", what)));
-  InstallationLogger()->info("{}: pre-staged", what);
+      runner, *seed.sync_helper,
+      fmt::format("{} pre-seed still running; downloading content", name),
+      progress_base, progress_span));
+  InstallationLogger()->info("{}: pre-staged", name);
+  return absl::OkStatus();
+}
+
+Status StepSeedStores(Runner& runner) {
+  const std::vector<SeedConfig>& seeds = runner.GetContext().config.seeds;
+  if (seeds.empty()) {
+    return absl::OkStatus();
+  }
+  const auto total = static_cast<double>(seeds.size());
+  for (size_t index = 0; index < seeds.size(); ++index) {
+    const double base = static_cast<double>(index) / total;
+    const double span = 1.0 / total;
+    PUU_RETURN_IF_ERROR(SeedStore(runner, seeds[index], base, span));
+    runner.ReportProgress(static_cast<double>(index + 1) / total);
+  }
   return absl::OkStatus();
 }
 
@@ -561,7 +624,10 @@ Status StepFirstboot(Runner& runner) {
 Status StepConfigureK3s(Runner& runner) {
   Context& context = runner.GetContext();
   SecretString token(std::move(context.k3s_token));
-  const K3sConfig& k3s = context.config.k3s;
+  if (!context.config.k3s.has_value()) {
+    return absl::OkStatus();
+  }
+  const K3sConfig& k3s = *context.config.k3s;
   if (k3s.role == K3sRole::kServer && !k3s.node_name.has_value()) {
     InstallationLogger()->info(
         "k3s cluster: using image default server configuration");
@@ -604,12 +670,17 @@ Status StepStageHomedIdentity(Runner& runner) {
   identity["homeDirectory"] = fmt::format("/var/home/{}", name);
   identity["imagePath"] = fmt::format("/var/home/{}.homedir", name);
   identity["storage"] = "fscrypt";
-  identity["preferredSessionLauncher"] = "gnome";
+  if (context.config.homed.session_launcher.has_value()) {
+    identity["preferredSessionLauncher"] =
+        context.config.homed.session_launcher->Value();
+  }
   identity["enforcePasswordPolicy"] = false;
   identity["privileged"]["hashedPassword"].push_back(hashed);
 
+  const std::filesystem::path& configured_path =
+      context.config.homed.identity_path;
   PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
-  const std::filesystem::path target = state / "var/lib/puu/identity.json";
+  const std::filesystem::path target = state / configured_path.relative_path();
   PUU_RETURN_IF_ERROR(CreateDirectories(target.parent_path()));
 
   std::string text =
@@ -625,61 +696,9 @@ Status StepStageHomedIdentity(Runner& runner) {
   context.user_password.Clear();
   PUU_RETURN_IF_ERROR(written);
 
-  InstallationLogger()->info(
-      "staged homed identity for {} at /var/lib/puu/identity.json", name);
+  InstallationLogger()->info("staged homed identity for {} at {}", name,
+                             configured_path.string());
   return absl::OkStatus();
-}
-
-StatusOr<std::vector<std::string>> ParseManifestRefs(
-    const std::filesystem::path& manifest) {
-  if (!Exists(manifest)) {
-    return std::vector<std::string>();
-  }
-
-  PUU_ASSIGN_OR_RETURN(const std::string content, ReadFile(manifest));
-  std::vector<std::string> refs;
-  std::string_view remaining(content);
-  while (!remaining.empty()) {
-    const size_t newline = remaining.find('\n');
-    std::string_view line = remaining.substr(0, newline);
-    remaining = newline == std::string_view::npos
-                    ? std::string_view()
-                    : remaining.substr(newline + 1);
-    const size_t comment = line.find('#');
-    if (comment != std::string_view::npos) {
-      line = line.substr(0, comment);
-    }
-    const std::string_view trimmed = Trim(line);
-    if (!trimmed.empty()) {
-      refs.emplace_back(trimmed);
-    }
-  }
-  return refs;
-}
-
-Status StepFlatpakSeed(Runner& runner) {
-  const FlatpakConfig& flatpak = runner.GetContext().config.flatpak;
-  if (!IsDirectory(flatpak.live_store)) {
-    // The helper installs nothing when the manifest lists no refs, so skip the
-    // chroot and the network round-trip entirely.
-    PUU_ASSIGN_OR_RETURN(const std::filesystem::path manifest,
-                         InDeployment(flatpak.manifest_path));
-    PUU_ASSIGN_OR_RETURN(const std::vector<std::string> refs,
-                         ParseManifestRefs(manifest));
-    if (refs.empty()) {
-      InstallationLogger()->info("flatpak-seed: no refs listed in {}",
-                                 flatpak.manifest_path.string());
-      return absl::OkStatus();
-    }
-  }
-  return SeedStore(runner, flatpak.live_store, flatpak.sync_helper,
-                   "var/lib/flatpak", "flatpak-seed");
-}
-
-Status StepModelsSeed(Runner& runner) {
-  const ModelsConfig& models = runner.GetContext().config.models;
-  return SeedStore(runner, models.live_store, models.sync_helper,
-                   "var/lib/vllm/models", "models-seed");
 }
 
 Status StepInstallBootloader(Runner& runner) {
@@ -801,11 +820,19 @@ Status StepFinalCleanup(Runner& /*runner*/) {
   return absl::OkStatus();
 }
 
-constexpr std::array<Step, 24> kSteps = {{
+bool RequiresSecureBoot(const Context& context) {
+  return context.secure_boot == SecureBootMode::kEnroll;
+}
+
+bool HasK3s(const Context& context) { return context.config.k3s.has_value(); }
+
+bool HasSeeds(const Context& context) { return !context.config.seeds.empty(); }
+
+constexpr std::array<Step, 23> kSteps = {{
     {.title = "Verify dependencies", .run = &StepDependencies},
     {.title = "Verify Secure Boot setup",
      .run = &StepSetupMode,
-     .requires_secure_boot = true},
+     .enabled = &RequiresSecureBoot},
     {.title = "Clean up previous mounts", .run = &StepCleanup},
     {.title = "Validate target drive", .run = &StepValidateDrive},
     {.title = "Verify image integrity", .run = &StepVerifyImage},
@@ -820,18 +847,22 @@ constexpr std::array<Step, 24> kSteps = {{
     {.title = "Mount home filesystem", .run = &StepMountHome},
     {.title = "Configure persistent mounts", .run = &StepConfigureMounts},
     {.title = "Configure firstboot identity", .run = &StepFirstboot},
-    {.title = "Configure k3s cluster", .run = &StepConfigureK3s},
+    {.title = "Configure k3s cluster",
+     .run = &StepConfigureK3s,
+     .enabled = &HasK3s},
     {.title = "Stage homed user identity", .run = &StepStageHomedIdentity},
-    {.title = "Pre-stage Flatpak refs", .run = &StepFlatpakSeed, .weight = 15},
-    {.title = "Pre-stage model catalog", .run = &StepModelsSeed, .weight = 15},
+    {.title = "Pre-stage stores",
+     .run = &StepSeedStores,
+     .weight = 15,
+     .enabled = &HasSeeds},
     {.title = "Install systemd-boot", .run = &StepInstallBootloader},
     {.title = "Stage ESP boot files", .run = &StepStageEspBoot},
     {.title = "Sign EFI binaries",
      .run = &StepSign,
-     .requires_secure_boot = true},
+     .enabled = &RequiresSecureBoot},
     {.title = "Enroll Secure Boot keys",
      .run = &StepEnrollKeys,
-     .requires_secure_boot = true},
+     .enabled = &RequiresSecureBoot},
     {.title = "Manage NVRAM boot entry", .run = &StepNvram},
     {.title = "Unmount target filesystems", .run = &StepFinalCleanup},
 }};

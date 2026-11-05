@@ -49,7 +49,10 @@ StatusOr<Context> BuildContext(const CommandLine& options) {
   PUU_ASSIGN_OR_RETURN(Config config, Config::Load(config_path));
 
   if (options.k3s_role.has_value()) {
-    config.k3s.role = *options.k3s_role;
+    if (!config.k3s.has_value()) {
+      config.k3s.emplace();
+    }
+    config.k3s->role = *options.k3s_role;
   }
 
   std::optional<std::filesystem::path> source_image = options.source_image;
@@ -70,8 +73,8 @@ StatusOr<Context> BuildContext(const CommandLine& options) {
                          ReadFirstSecretLine(*options.k3s_token_file));
   }
 
-  if (config.k3s.role == K3sRole::kAgent &&
-      (!config.k3s.server_url.has_value() || k3s_token.Empty())) {
+  if (config.k3s.has_value() && config.k3s->role == K3sRole::kAgent &&
+      (!config.k3s->server_url.has_value() || k3s_token.Empty())) {
     return InvalidArgumentError(
         "k3s agent role requires k3s.serverUrl and --k3s-token-file");
   }

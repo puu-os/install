@@ -25,8 +25,7 @@ Status Runner::Execute(std::span<const Step> steps) {
       Rollback();
       return absl::AbortedError("installation cancelled");
     }
-    if (step.requires_secure_boot &&
-        context_.secure_boot == SecureBootMode::kSkip) {
+    if (!step.IsEnabled(context_)) {
       if (skip_callback_) {
         skip_callback_(index);
       }

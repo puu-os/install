@@ -298,6 +298,9 @@ StatusOr<std::vector<KernelArg>> InstallKernelArgs(std::string_view root_uuid,
     PUU_ASSIGN_OR_RETURN(KernelArg arg, KernelArg::Parse(text));
     args.push_back(std::move(arg));
   }
+  for (const KernelArg& arg : config.kernel_args) {
+    args.push_back(arg);
+  }
 
   const auto configured =
       config.serial_console.find(std::string(ArchName(machine)));

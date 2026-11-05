@@ -191,14 +191,14 @@ struct PartitionsConfig {
 };
 
 struct LabelsConfig {
-  VolumeLabel root;  // XFS, at most 12 bytes.
-  VolumeLabel home;  // ext4, at most 16 bytes.
+  VolumeLabel root;
+  VolumeLabel home;
 };
 
 struct ImageConfig {
-  ImageRef target_imgref;
+  std::optional<ImageRef> target_imgref;
   std::optional<Digest> expected_digest;
-  std::optional<VolumeLabel> source_label;  // at most 16 bytes.
+  std::optional<VolumeLabel> source_label;
   std::filesystem::path source_mount;
 };
 
@@ -209,17 +209,12 @@ struct IdentityConfig {
   Hostname hostname;
 };
 
-struct FlatpakConfig {
-  // Ref list consulted inside the target to decide whether pre-seeding has any
-  // work to do. The sync helper reads the same file at its own default path.
-  std::filesystem::path manifest_path;
-  std::filesystem::path sync_helper;
-  std::filesystem::path live_store;
-};
-
-struct ModelsConfig {
-  std::filesystem::path sync_helper;
-  std::filesystem::path live_store;
+struct SeedConfig {
+  SingleLine name;
+  std::filesystem::path target;
+  std::optional<std::filesystem::path> live_store;
+  std::optional<std::filesystem::path> sync_helper;
+  std::optional<std::filesystem::path> manifest_path;
 };
 
 struct K3sConfig {
@@ -230,21 +225,17 @@ struct K3sConfig {
 
 struct HomedConfig {
   std::vector<GroupName> groups;
+  std::filesystem::path identity_path;
+  std::optional<SingleLine> session_launcher;
 };
 
-// Full installer configuration. Unknown YAML keys are rejected so that a
-// misspelled key never silently falls back to a default.
 struct Config {
   static Config Defaults();
 
-  // Parses YAML text. The caller owns error reporting; no partial config is
-  // returned on failure.
   static StatusOr<Config> ParseYaml(std::string_view yaml);
 
   static StatusOr<Config> Load(const std::filesystem::path& path);
 
-  // Smallest target drive the layout fits on: efi + rootMin + home + 1 GiB of
-  // GPT and alignment slack.
   [[nodiscard]] StatusOr<uint64_t> MinTargetSizeBytes() const;
 
   BrandingConfig branding;
@@ -252,11 +243,10 @@ struct Config {
   LabelsConfig labels;
   ImageConfig image;
   IdentityConfig identity;
-  FlatpakConfig flatpak;
-  ModelsConfig models;
-  K3sConfig k3s;
+  std::vector<SeedConfig> seeds;
+  std::optional<K3sConfig> k3s;
   HomedConfig homed;
-  // Architecture name -> kernel console argument.
+  std::vector<KernelArg> kernel_args;
   std::map<std::string, KernelArg> serial_console;
 };
 

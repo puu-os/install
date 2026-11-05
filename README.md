@@ -14,16 +14,16 @@ This is the default configuration:
 
 ```yaml
 branding:
-  name: Puu
+  name: Linux
 partitions:
   efi: 512M
   rootMin: 64G
   home: 256G
 labels:
-  root: puu-root
-  home: puu-home
+  root: root
+  home: home
 image:
-  targetImgRef: quay.io/puu/puu:latest
+  targetImgRef: ""         # required unless provided by image.manifest
   expectedDigest: ""       # sha256 of raw OCI manifest for local sources
   sourceLabel: PAYLOAD
   sourceMount: /run/puu-installer/payload
@@ -31,36 +31,15 @@ identity:
   keymap: us
   locale: C.UTF-8
   timezone: UTC
-  hostname: puu
-flatpak:
-  manifestPath: /usr/share/puu/flatpaks.list
-  syncHelper: /usr/libexec/puu/flatpak-sync
-  liveStore: /var/lib/flatpak
-models:
-  manifestPath: /usr/share/puu/models.list
-  syncHelper: /usr/libexec/puu/model-sync
-  liveStore: /var/lib/vllm/models
-k3s:
-  role: server          # "server" or "agent"
-  serverUrl: ""         # required when role is "agent"
-  nodeName: ""
+  hostname: localhost
 homed:
-  groups:
-    - adm
-    - audio
-    - cdrom
-    - dip
-    - input
-    - lpadmin
-    - netdev
-    - plugdev
-    - render
-    - sudo
-    - video
-    - wheel
-    - realtime
-    - uucp
-serialConsole: {}       # map of machine name -> console
+  groups: []
+  identityPath: /var/lib/firstboot/homed-identity.json
+  sessionLauncher: ""      # omitted from user record when empty
+seeds: []                  # list of {name, target, liveStore, syncHelper, manifestPath}
+k3s: null                  # optional {role, serverUrl, nodeName}
+kernelArgs: []
+serialConsole: {}          # map of machine name -> console
 ```
 Optional K3s token must be passed via `--k3s-token-file`.
 

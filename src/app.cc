@@ -1352,7 +1352,12 @@ void Installer::Impl::StartInstall() {
   install_notice_.clear();
   log_scroll_ = 0;
   current_step_ = 0;
-  step_states_.assign(steps.size(), StepState::kPending);
+  step_states_.resize(steps.size());
+  for (size_t index = 0; index < steps.size(); ++index) {
+    step_states_[index] = steps[index].IsEnabled(context_)
+                              ? StepState::kPending
+                              : StepState::kSkipped;
+  }
   step_fractions_.assign(steps.size(), 0.0);
   install_started_ = std::chrono::steady_clock::now();
   install_elapsed_ = std::chrono::seconds{0};
@@ -1458,7 +1463,7 @@ void Installer::Impl::OnStepSkipped(size_t step_index) {
     return;
   }
   step_states_[step_index] = StepState::kSkipped;
-  step_fractions_[step_index] = 1.0;
+  step_fractions_[step_index] = 0.0;
 }
 
 void Installer::Impl::OnInstallFinished(const Status& status) {
@@ -1504,14 +1509,17 @@ double Installer::Impl::OverallProgress() const {
   }
   double total = 0.0;
   double progressed = 0.0;
-  size_t index = 0;
-  for (const Step& step : Steps()) {
-    const double weight = step.weight;
+  const std::span<const Step> steps = Steps();
+  for (size_t index = 0; index < steps.size(); ++index) {
+    if (index < step_states_.size() &&
+        step_states_[index] == StepState::kSkipped) {
+      continue;
+    }
+    const double weight = steps[index].weight;
     total += weight;
     if (index < step_fractions_.size()) {
       progressed += weight * step_fractions_[index];
     }
-    ++index;
   }
   return total > 0.0 ? progressed / total : 0.0;
 }

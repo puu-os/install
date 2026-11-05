@@ -467,8 +467,52 @@ Status ParseInto(std::string_view path, const YAML::Node& node,
     return FieldError(path, text,
                       InvalidArgumentError("must be an absolute path"));
   }
-  *out = value.lexically_normal();
+  std::filesystem::path normalized = value.lexically_normal();
+  if (!normalized.has_filename() && normalized != "/") {
+    normalized = normalized.parent_path();
+  }
+  *out = std::move(normalized);
   return absl::OkStatus();
+}
+
+Status ParseInto(std::string_view path, const YAML::Node& node,
+                 std::optional<std::filesystem::path>* out) {
+  if (node.IsNull()) {
+    out->reset();
+    return absl::OkStatus();
+  }
+  PUU_ASSIGN_OR_RETURN(const std::string text, ScalarText(path, node));
+  const absl::string_view trimmed = absl::StripAsciiWhitespace(text);
+  if (trimmed.empty()) {
+    out->reset();
+    return absl::OkStatus();
+  }
+  std::filesystem::path parsed;
+  PUU_RETURN_IF_ERROR(
+      ParseInto(path, YAML::Node(std::string(trimmed)), &parsed));
+  *out = std::move(parsed);
+  return absl::OkStatus();
+}
+
+bool IsUnderVar(const std::filesystem::path& path) {
+  auto it = path.begin();
+  if (it == path.end() || *it != "/") {
+    return false;
+  }
+  ++it;
+  if (it == path.end() || *it != "var") {
+    return false;
+  }
+  ++it;
+  if (it == path.end() || it->empty()) {
+    return false;
+  }
+  for (; it != path.end(); ++it) {
+    if (it->empty() || *it == "." || *it == "..") {
+      return false;
+    }
+  }
+  return true;
 }
 
 Status ParseInto(std::string_view path, const YAML::Node& node, K3sRole* out) {
@@ -554,7 +598,10 @@ Status ParseInto(std::string_view path, const YAML::Node& node,
 }
 
 Status ParseInto(std::string_view path, const YAML::Node& node,
-                 std::vector<GroupName>* out) {
+                 SeedConfig* out);
+template <typename T>
+Status ParseInto(std::string_view path, const YAML::Node& node,
+                 std::vector<T>* out) {
   if (!node.IsDefined() || node.IsNull()) {
     out->clear();
     return absl::OkStatus();
@@ -562,15 +609,15 @@ Status ParseInto(std::string_view path, const YAML::Node& node,
   if (!node.IsSequence()) {
     return InvalidArgumentError("{} must be a sequence", path);
   }
-  std::vector<GroupName> groups;
-  groups.reserve(node.size());
+  std::vector<T> items;
+  items.reserve(node.size());
   for (size_t index = 0; index < node.size(); ++index) {
-    GroupName group;
+    T item;
     PUU_RETURN_IF_ERROR(
-        ParseInto(fmt::format("{}[{}]", path, index), node[index], &group));
-    groups.push_back(std::move(group));
+        ParseInto(fmt::format("{}[{}]", path, index), node[index], &item));
+    items.push_back(std::move(item));
   }
-  *out = std::move(groups);
+  *out = std::move(items);
   return absl::OkStatus();
 }
 
@@ -664,12 +711,62 @@ struct SectionEntry {
   }
 };
 
+const auto& SeedFields() {
+  static const absl::NoDestructor fields(
+      std::array{BindField("name", &SeedConfig::name),
+                 BindField("target", &SeedConfig::target),
+                 BindField("liveStore", &SeedConfig::live_store),
+                 BindField("syncHelper", &SeedConfig::sync_helper),
+                 BindField("manifestPath", &SeedConfig::manifest_path)});
+  return *fields;
+}
+
+Status ParseInto(std::string_view path, const YAML::Node& node,
+                 SeedConfig* out) {
+  if (!node.IsDefined() || node.IsNull() || !node.IsMap()) {
+    return InvalidArgumentError("{} must be a mapping", path);
+  }
+  SeedConfig seed;
+  PUU_RETURN_IF_ERROR(ParseFields(path, node, &seed, SeedFields()));
+  if (seed.name.Empty()) {
+    return InvalidArgumentError("{}.name must not be empty", path);
+  }
+  if (!IsUnderVar(seed.target)) {
+    return InvalidArgumentError("{}.target must be beneath /var", path);
+  }
+  if (!seed.live_store.has_value() && !seed.sync_helper.has_value()) {
+    return InvalidArgumentError("{} requires liveStore or syncHelper", path);
+  }
+  *out = std::move(seed);
+  return absl::OkStatus();
+}
+
+const auto& K3sFields() {
+  static const absl::NoDestructor fields(
+      std::array{BindField("role", &K3sConfig::role),
+                 BindField("serverUrl", &K3sConfig::server_url),
+                 BindField("nodeName", &K3sConfig::node_name)});
+  return *fields;
+}
+
+Status ParseK3sSection(std::string_view path, const YAML::Node& node,
+                       std::optional<K3sConfig>* out) {
+  if (!node.IsDefined() || node.IsNull()) {
+    out->reset();
+    return absl::OkStatus();
+  }
+  K3sConfig k3s;
+  PUU_RETURN_IF_ERROR(ParseFields(path, node, &k3s, K3sFields()));
+  *out = std::move(k3s);
+  return absl::OkStatus();
+}
+
 const auto& Sections() {
   static const absl::NoDestructor sections(std::tuple{
       SectionEntry{.key = "branding",
                    .section = &Config::branding,
                    .fields = std::array{BindField("name", &BrandingConfig::name,
-                                                  "Puu")}},
+                                                  "Linux")}},
       SectionEntry{
           .key = "partitions",
           .section = &Config::partitions,
@@ -682,62 +779,40 @@ const auto& Sections() {
           .key = "labels",
           .section = &Config::labels,
           .fields = std::array{BindField<kXfsLabelMax>(
-                                   "root", &LabelsConfig::root, "puu-root"),
+                                   "root", &LabelsConfig::root, "root"),
                                BindField<kExt4LabelMax>(
-                                   "home", &LabelsConfig::home, "puu-home")}},
+                                   "home", &LabelsConfig::home, "home")}},
       SectionEntry{
           .key = "image",
           .section = &Config::image,
           .fields =
-              std::array{
-                  BindField("targetImgRef", &ImageConfig::target_imgref,
-                            "quay.io/puu/puu:latest"),
-                  BindField("expectedDigest", &ImageConfig::expected_digest),
-                  BindField<kExt4LabelMax>(
-                      "sourceLabel", &ImageConfig::source_label, "PAYLOAD"),
-                  BindField("sourceMount", &ImageConfig::source_mount,
-                            "/run/puu-installer/payload")}},
+              std::array{BindField("targetImgRef", &ImageConfig::target_imgref),
+                         BindField("expectedDigest",
+                                   &ImageConfig::expected_digest),
+                         BindField<kExt4LabelMax>(
+                             "sourceLabel", &ImageConfig::source_label,
+                             "PAYLOAD"),
+                         BindField("sourceMount", &ImageConfig::source_mount,
+                                   "/run/puu-installer/payload")}},
       SectionEntry{
           .key = "identity",
           .section = &Config::identity,
           .fields =
-              std::array{
-                  BindField("keymap", &IdentityConfig::keymap, "us"),
-                  BindField("locale", &IdentityConfig::locale, "C.UTF-8"),
-                  BindField("timezone", &IdentityConfig::timezone, "UTC"),
-                  BindField("hostname", &IdentityConfig::hostname, "puu")}},
-      SectionEntry{
-          .key = "flatpak",
-          .section = &Config::flatpak,
-          .fields =
-              std::array{
-                  BindField("manifestPath", &FlatpakConfig::manifest_path,
-                            "/usr/share/puu/flatpaks.list"),
-                  BindField("syncHelper", &FlatpakConfig::sync_helper,
-                            "/usr/libexec/puu/flatpak-sync"),
-                  BindField("liveStore", &FlatpakConfig::live_store,
-                            "/var/lib/flatpak")}},
-      SectionEntry{
-          .key = "models",
-          .section = &Config::models,
-          .fields =
-              std::array{BindField("syncHelper", &ModelsConfig::sync_helper,
-                                   "/usr/libexec/puu/preseed-vllm-models"),
-                         BindField("liveStore", &ModelsConfig::live_store,
-                                   "/var/lib/vllm/models")}},
-      SectionEntry{
-          .key = "k3s",
-          .section = &Config::k3s,
-          .fields = std::array{BindField("role", &K3sConfig::role, "server"),
-                               BindField("serverUrl", &K3sConfig::server_url),
-                               BindField("nodeName", &K3sConfig::node_name)}},
+              std::array{BindField("keymap", &IdentityConfig::keymap, "us"),
+                         BindField("locale", &IdentityConfig::locale,
+                                   "C.UTF-8"),
+                         BindField("timezone", &IdentityConfig::timezone,
+                                   "UTC"),
+                         BindField("hostname", &IdentityConfig::hostname,
+                                   "localhost")}},
       SectionEntry{
           .key = "homed",
           .section = &Config::homed,
-          .fields = std::array{BindField(
-              "groups", &HomedConfig::groups,
-              "[adm, audio, cdrom, dip, input, lpadmin, netdev, "
-              "plugdev, render, sudo, video, wheel, realtime, uucp]")}}});
+          .fields = std::array{
+              BindField("groups", &HomedConfig::groups),
+              BindField("identityPath", &HomedConfig::identity_path,
+                        "/var/lib/firstboot/homed-identity.json"),
+              BindField("sessionLauncher", &HomedConfig::session_launcher)}}});
   return *sections;
 }
 
@@ -802,6 +877,15 @@ StatusOr<Config> Config::ParseYaml(std::string_view yaml) {
       "", root,
       [&config](std::string_view key, const YAML::Node& value,
                 const std::string& field) -> Status {
+        if (key == "seeds") {
+          return ParseInto(field, value, &config.seeds);
+        }
+        if (key == "k3s") {
+          return ParseK3sSection(field, value, &config.k3s);
+        }
+        if (key == "kernelArgs") {
+          return ParseInto(field, value, &config.kernel_args);
+        }
         if (key == "serialConsole") {
           return ParseInto(field, value, &config.serial_console);
         }
@@ -818,6 +902,9 @@ StatusOr<Config> Config::ParseYaml(std::string_view yaml) {
         return matched.has_value() ? *matched : UnknownKeyError(field);
       }));
 
+  if (!IsUnderVar(config.homed.identity_path)) {
+    return InvalidArgumentError("homed.identityPath must be beneath /var");
+  }
   constexpr uint64_t kMiB = uint64_t{1} << 20;
   constexpr uint64_t kGiB = uint64_t{1} << 30;
   struct SizeFloor {

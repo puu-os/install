@@ -485,10 +485,12 @@ StatusOr<ImageRef> ImageManifest::TargetImgRef(const Config& config) const {
   if (target_imgref.has_value()) {
     return *target_imgref;
   }
-  if (!config.image.target_imgref.Empty()) {
-    return config.image.target_imgref;
+  if (config.image.target_imgref.has_value()) {
+    return *config.image.target_imgref;
   }
-  return InvalidArgumentError("target image reference is empty");
+  return InvalidArgumentError(
+      "no target image reference: set image.targetImgRef or provide "
+      "target_imgref in image.manifest");
 }
 
 StatusOr<uint64_t> ImageManifest::EstimatedInstallBytes(

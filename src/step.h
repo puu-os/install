@@ -27,8 +27,11 @@ struct Step {
   // gigabytes are weighted far above bookkeeping steps.
   int weight = 1;
 
-  // Skipped entirely when the user declined Secure Boot enrolment.
-  bool requires_secure_boot = false;
+  bool (*enabled)(const Context& context) = nullptr;
+
+  [[nodiscard]] bool IsEnabled(const Context& context) const {
+    return enabled == nullptr || enabled(context);
+  }
 
   // Writing the partition table destroys the previous contents of the drive.
   // Cancellation is refused from this step onwards.
