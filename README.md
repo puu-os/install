@@ -1,14 +1,14 @@
 <!-- SPDX-License-Identifier: GPL-2.0-or-later -->
 <!-- Copyright (C) Opinsys Oy 2026 -->
 
-# Puu OS installer
+# puu-install
 
-Puu OS installer is a standalone installer for bootc based operating systems.
+`puu-install` is a standalone installer for bootc based operating systems.
 
 ## Deployment configuration
 
 A deployment configuration must be provided either via `--config-path` or
-`PUU_INSTALLER_CONFIG`.
+`PUU_INSTALL_CONFIG`.
 
 This is the default configuration:
 
@@ -27,7 +27,7 @@ image:
   targetImgRef: ""         # required unless provided by image.manifest
   expectedDigest: ""       # sha256 of raw OCI manifest for local sources
   sourceLabel: PAYLOAD
-  sourceMount: /run/puu-installer/payload
+  sourceMount: /run/puu-install/payload
 identity:
   keymap: us
   locale: C.UTF-8
@@ -59,5 +59,5 @@ For native development on Linux:
 
 ## Licensing
 
-Puu OS installer has been licensed with the GNU General Public License 2.0, or a
+`puu-install` has been licensed with the GNU General Public License 2.0, or a
 newer version. Study [`LICENSE`](LICENSE) for further details.

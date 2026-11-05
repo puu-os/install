@@ -55,9 +55,9 @@ constexpr mode_t kPublicFileMode = 0644;
 constexpr mode_t kSecretFileMode = 0600;
 
 constexpr std::string_view kBootcStorageConf =
-    "/run/puu-installer/bootc-storage.conf";
+    "/run/puu-install/bootc-storage.conf";
 constexpr std::string_view kBootcGraphRoot =
-    "/run/puu-installer/target/var/tmp/puu-bootc-storage/containers/storage";
+    "/run/puu-install/target/var/tmp/puu-bootc-storage/containers/storage";
 constexpr std::string_view kContainersRunRoot = "/run/containers/storage";
 constexpr std::string_view kHostVarTmp = "/var/tmp";
 
@@ -586,7 +586,7 @@ Status StepConfigureMounts(Runner& runner) {
   PUU_RETURN_IF_ERROR(WriteFile(fstab, merged, kPublicFileMode));
 
   const std::filesystem::path zram_conf = deployment->InDeployment(
-      "/etc/systemd/zram-generator.conf.d/99-installer.conf");
+      "/etc/systemd/zram-generator.conf.d/99-puu-install.conf");
   if (context.hibernate) {
     if (Exists(zram_conf)) {
       std::error_code error;

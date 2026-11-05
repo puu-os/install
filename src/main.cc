@@ -33,14 +33,14 @@ StatusOr<std::filesystem::path> ResolveConfigPath(const CommandLine& options) {
     return *options.config_path;
   }
 
-  const char* from_env = std::getenv("PUU_INSTALLER_CONFIG");
+  const char* from_env = std::getenv("PUU_INSTALL_CONFIG");
   if (from_env != nullptr && *from_env != '\0') {
     return std::filesystem::path(from_env);
   }
 
   return InvalidArgumentError(
       "no configuration file: pass --config-path or set "
-      "PUU_INSTALLER_CONFIG");
+      "PUU_INSTALL_CONFIG");
 }
 
 StatusOr<Context> BuildContext(const CommandLine& options) {
@@ -109,7 +109,7 @@ int RunInstaller(Context context) {
         SyncAll();
         ::reboot(RB_AUTOBOOT);
 
-        std::fprintf(stderr, "puu-installer: reboot failed\n");
+        std::fprintf(stderr, "puu-install: reboot failed\n");
         return EXIT_FAILURE;
       }
 
@@ -122,7 +122,7 @@ int RunInstaller(Context context) {
         SyncAll();
         ::reboot(RB_AUTOBOOT);
 
-        std::fprintf(stderr, "puu-installer: reboot failed\n");
+        std::fprintf(stderr, "puu-install: reboot failed\n");
         return EXIT_FAILURE;
       }
 
@@ -152,26 +152,26 @@ int Main(int argc, char** argv) {
   }
 
   if (!RunningAsRoot()) {
-    std::fprintf(stderr, "puu-installer: must be run as root\n");
+    std::fprintf(stderr, "puu-install: must be run as root\n");
     return EXIT_FAILURE;
   }
 
   if (const Status status = InitLogging(); !status.ok()) {
-    std::fprintf(stderr, "puu-installer: %s\n",
+    std::fprintf(stderr, "puu-install: %s\n",
                  std::string(status.message()).c_str());
     return EXIT_FAILURE;
   }
-  spdlog::info("installer started");
+  spdlog::info("puu-install started");
 
   if (const Status status = EnterPrivateMountNamespace(); !status.ok()) {
-    std::fprintf(stderr, "puu-installer: %s\n",
+    std::fprintf(stderr, "puu-install: %s\n",
                  std::string(status.message()).c_str());
     return EXIT_FAILURE;
   }
 
   StatusOr<Context> context = BuildContext(parsed.options);
   if (!context.ok()) {
-    std::fprintf(stderr, "puu-installer: %s\n",
+    std::fprintf(stderr, "puu-install: %s\n",
                  std::string(context.status().message()).c_str());
     return EXIT_FAILURE;
   }

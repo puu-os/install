@@ -4,7 +4,7 @@
 CMAKE ?= cmake
 BUILDDIR ?= build
 
-.PHONY: default help all setup check ci format container-build publish clean
+.PHONY: default help all setup check ci format package container-build publish clean
 
 default: help
 
@@ -12,18 +12,21 @@ help: ## Show this help
 	@awk -F ':[^#]*## ?' '/^[a-z_-]+:[^#]*##/{printf "  make %-20s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 setup: ## Configure the build directory
-	$(CMAKE) -S . -B $(BUILDDIR) -G Ninja
+	$(CMAKE) -S . -B $(BUILDDIR)
 
-all: setup ## Build the installer
+all: setup ## Build the project
 	$(CMAKE) --build $(BUILDDIR)
 
-check: all ## Build the installer
+check: all ## Run checks
 
 ci: ## Run the local CI script
 	./scripts/ci.sh
 
 format: ## Reformat the sources in place
 	find src -name '*.cc' -o -name '*.h' | xargs clang-format -i
+
+package: ## Package multi-architecture AppImages and npm binaries
+	./scripts/package-all.sh
 
 container-build: ## Build OCI container image
 	CONTAINER="$(CONTAINER)" ./scripts/build.sh

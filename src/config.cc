@@ -795,7 +795,7 @@ const auto& Sections() {
                   BindField<kExt4LabelMax>(
                       "sourceLabel", &ImageConfig::source_label, "PAYLOAD"),
                   BindField("sourceMount", &ImageConfig::source_mount,
-                            "/run/puu-installer/payload")}},
+                            "/run/puu-install/payload")}},
       SectionEntry{
           .key = "identity",
           .section = &Config::identity,

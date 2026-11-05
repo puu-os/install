@@ -28,6 +28,13 @@ ver_gt() {
 committed=0
 signing_check_tag=""
 
+release_files=(
+	CMakeLists.txt
+	package.json
+	npm/linux-x64/package.json
+	npm/linux-arm64/package.json
+)
+
 cleanup() {
 	local status=$?
 
@@ -38,7 +45,7 @@ cleanup() {
 	fi
 	rm -f CMakeLists.txt.next
 	if (( status != 0 && !committed )); then
-		git restore -- CMakeLists.txt 2>/dev/null || true
+		git restore -- "${release_files[@]}" 2>/dev/null || true
 	fi
 	return "$status"
 }
@@ -62,15 +69,15 @@ trap cleanup EXIT
 [[ -z "$(git tag -l "$next_ver")" ]] \
 	|| die "tag $next_ver already exists"
 
-signing_check_tag="puu-installer-signing-check-$next_ver-$$"
+signing_check_tag="puu-install-signing-check-$next_ver-$$"
 [[ -z "$(git tag -l "$signing_check_tag")" ]] \
 	|| die "temporary signing-check tag already exists: $signing_check_tag"
-git tag -s "$signing_check_tag" -m "puu-installer release signing check" \
+git tag -s "$signing_check_tag" -m "puu-install release signing check" \
 	|| die "cannot sign release tags; renew or configure the Git signing key"
 git tag -d "$signing_check_tag" >/dev/null
 signing_check_tag=""
 
-pkg=puu-installer
+pkg=puu-install
 cur_ver="$(read_project_version CMakeLists.txt)"
 [[ -n "$cur_ver" ]] || die "cannot find version in CMakeLists.txt"
 
@@ -94,6 +101,21 @@ mv CMakeLists.txt.next CMakeLists.txt
 [[ "$(read_project_version CMakeLists.txt)" == "$next_ver" ]] \
 	|| die "failed to update version in CMakeLists.txt"
 
+node -e '
+	const fs = require("node:fs");
+	const nextVer = process.argv[1];
+	for (const file of ["package.json", "npm/linux-x64/package.json", "npm/linux-arm64/package.json"]) {
+		const pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+		pkg.version = nextVer;
+		if (pkg.optionalDependencies) {
+			for (const k of Object.keys(pkg.optionalDependencies)) {
+				pkg.optionalDependencies[k] = nextVer;
+			}
+		}
+		fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n");
+	}
+' "$next_ver"
+
 ./scripts/ci.sh
 
 git rev-parse -q --verify "refs/tags/$cur_ver" >/dev/null \
@@ -115,4 +137,4 @@ printf '%s %s\n\n%s\n\n%s\n' "$pkg" "$next_ver" "$log" "$sob" | git tag -s "$nex
 printf 'tagged %s\n' "$next_ver"
 printf 'push the commit and tag: git push --atomic origin %q %q\n' \
 	"HEAD:refs/heads/$branch" "refs/tags/$next_ver"
-printf 'then run: make publish\n'
+printf 'then run: make ci, make package, and make publish\n'

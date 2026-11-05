@@ -8,12 +8,12 @@ if(PUU_SANITIZE)
   add_link_options(-fsanitize=${PUU_SANITIZE})
 endif()
 add_compile_options(${PUU_COMPILE_OPTIONS})
-add_compile_definitions(PUU_INSTALLER_VERSION="${PROJECT_VERSION}")
+add_compile_definitions(PUU_INSTALL_VERSION="${PROJECT_VERSION}")
 if(ftxui_VERSION_MAJOR)
   add_compile_definitions(FTXUI_VERSION_MAJOR=${ftxui_VERSION_MAJOR})
 endif()
 
-add_executable(puu-installer
+add_executable(puu-install
   app.cc
   block.cc
   cli.cc
@@ -38,8 +38,8 @@ add_executable(puu-installer
   timezone.cc
   util.cc
   widgets.cc)
-target_include_directories(puu-installer PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(puu-installer PRIVATE
+target_include_directories(puu-install PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(puu-install PRIVATE
   argtable3::argtable3
   yaml-cpp::yaml-cpp
   fmt::fmt
@@ -58,4 +58,4 @@ target_link_libraries(puu-installer PRIVATE
   PkgConfig::UDEV
   PkgConfig::MOUNT
   Threads::Threads)
-install(TARGETS puu-installer RUNTIME)
+install(TARGETS puu-install RUNTIME)

@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.31)
 
 project(
-  puu-installer
+  puu-install
   VERSION 1.0.64
   LANGUAGES CXX)
 

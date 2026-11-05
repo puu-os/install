@@ -45,8 +45,8 @@ std::string TruncateUtf8(std::string_view text, size_t max_bytes) {
 
 namespace {
 
-constexpr const char* kLogDirectory = "/run/puu-installer";
-constexpr const char* kLogPath = "/run/puu-installer/install.log";
+constexpr const char* kLogDirectory = "/run/puu-install";
+constexpr const char* kLogPath = "/run/puu-install/install.log";
 
 constexpr size_t kMaxLineBytes = 1024;
 
@@ -144,21 +144,21 @@ class ScreenSink final : public spdlog::sinks::base_sink<std::mutex> {
 
 StatusOr<UniqueFd> OpenLogFile() {
   if (::mkdir(kLogDirectory, 0700) != 0 && errno != EEXIST) {
-    return ErrnoToStatus(errno, "mkdir /run/puu-installer");
+    return ErrnoToStatus(errno, "mkdir /run/puu-install");
   }
 
   if (::chmod(kLogDirectory, 0700) != 0) {
-    return ErrnoToStatus(errno, "chmod /run/puu-installer");
+    return ErrnoToStatus(errno, "chmod /run/puu-install");
   }
 
   UniqueFd opened(::open(
       kLogPath, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600));
   if (!opened) {
-    return ErrnoToStatus(errno, "open /run/puu-installer/install.log");
+    return ErrnoToStatus(errno, "open /run/puu-install/install.log");
   }
   if (::fchmod(opened.Get(), 0600) != 0) {
     const int error = errno;
-    return ErrnoToStatus(error, "fchmod /run/puu-installer/install.log");
+    return ErrnoToStatus(error, "fchmod /run/puu-install/install.log");
   }
   return opened;
 }

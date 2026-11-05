@@ -15,7 +15,7 @@ namespace puu {
 // Options accepted on the command line. Everything else is configured through
 // the YAML configuration file.
 struct CommandLine {
-  // Configuration file. Falls back to $PUU_INSTALLER_CONFIG when absent.
+  // Configuration file. Falls back to $PUU_INSTALL_CONFIG when absent.
   std::optional<std::filesystem::path> config_path;
   // Overrides automatic discovery of the local bootc source image.
   std::optional<std::filesystem::path> source_image;

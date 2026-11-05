@@ -14,7 +14,7 @@
 namespace puu {
 namespace {
 
-constexpr const char* kProgramName = "puu-installer";
+constexpr const char* kProgramName = "puu-install";
 
 template <size_t N>
 class ArgTable {
@@ -44,7 +44,7 @@ void PrintHelp(void** table) {
   std::printf(
       "\nStandalone installer for bootc-based operating systems.\n\n"
       "Configuration is read from the file given by --config-path, or from\n"
-      "the PUU_INSTALLER_CONFIG environment variable when the option is\n"
+      "the PUU_INSTALL_CONFIG environment variable when the option is\n"
       "omitted. --config-path takes precedence.\n\n"
       "Options:\n");
   arg_print_glossary(stdout, table, "  %-26s %s\n");
@@ -94,7 +94,7 @@ ParseResult ParseCommandLine(int argc, char** argv) {
   }
 
   if (version->count > 0) {
-    std::printf("%s %s\n", kProgramName, PUU_INSTALLER_VERSION);
+    std::printf("%s %s\n", kProgramName, PUU_INSTALL_VERSION);
     result.outcome = ParseOutcome::kExitSuccess;
     return result;
   }

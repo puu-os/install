@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=puu-install
+Comment=Puu OS install
+Exec=puu-install
+Icon=puu-install
+Terminal=true
+Categories=System;

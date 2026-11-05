@@ -1,0 +1,35 @@
+{
+  "name": "@puu/install",
+  "version": "1.0.64",
+  "description": "Puu OS install",
+  "license": "GPL-2.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/puu-os/install.git"
+  },
+  "bugs": {
+    "url": "https://github.com/puu-os/install/issues"
+  },
+  "homepage": "https://github.com/puu-os/install#readme",
+  "bin": {
+    "puu-install": "bin/puu-install.js"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "os": [
+    "linux"
+  ],
+  "optionalDependencies": {
+    "@puu/install-linux-arm64": "1.0.64",
+    "@puu/install-linux-x64": "1.0.64"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

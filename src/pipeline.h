@@ -30,11 +30,11 @@ std::shared_ptr<spdlog::logger> InstallationLogger();
 
 // Mount points owned by the installer. All live under /run so that nothing
 // survives a reboot.
-inline constexpr std::string_view kTargetMount = "/run/puu-installer/target";
+inline constexpr std::string_view kTargetMount = "/run/puu-install/target";
 inline constexpr std::string_view kTargetEfiMount =
-    "/run/puu-installer/target/efi";
+    "/run/puu-install/target/efi";
 inline constexpr std::string_view kTargetHomeMount =
-    "/run/puu-installer/target/var/home";
+    "/run/puu-install/target/var/home";
 
 // Puts the process in a private mount namespace.
 //

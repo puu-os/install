@@ -16,7 +16,7 @@ namespace puu {
 // Truncates to at most `max_bytes` without splitting a UTF-8 sequence.
 std::string TruncateUtf8(std::string_view text, size_t max_bytes);
 
-// Creates /run/puu-installer/install.log and points spdlog at it, plus an
+// Creates /run/puu-install/install.log and points spdlog at it, plus an
 // in-memory sink feeding the installation screen. Call once, before the UI
 // starts. The log holds passwords in neither sink, but it does hold device
 // paths, so both the directory and the file are owner-only.

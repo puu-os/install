@@ -1,0 +1,23 @@
+{
+  "name": "@puu/install-linux-x64",
+  "version": "1.0.64",
+  "description": "Puu OS install AppImage for Linux x64",
+  "license": "GPL-2.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/puu-os/install.git"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/puu-install.AppImage",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

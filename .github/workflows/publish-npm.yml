@@ -1,0 +1,75 @@
+name: Publish locally packed npm tarballs
+run-name: Publish npm ${{ inputs.version }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Signed release tag, for example 1.2.3
+        required: true
+        type: string
+
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Validate release tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: '[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.version }}
+          persist-credentials: false
+      - name: Check out publisher from workflow revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .npm-publisher
+          sparse-checkout: scripts/publish-npm-provenance.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install npm with OIDC trusted publishing support
+        run: npm install -g npm@11
+      - name: Download locally packed release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          test "$(gh release view "$VERSION" --json isDraft --jq .isDraft)" = true
+          mkdir -p "$RUNNER_TEMP/npm-release"
+          gh release download "$VERSION" --dir "$RUNNER_TEMP/npm-release" \
+            --pattern '*.tgz' --pattern '*.tgz.sha256'
+      - name: Verify all tarballs before publishing any
+        env:
+          VERSION: ${{ inputs.version }}
+        run: .npm-publisher/scripts/publish-npm-provenance.sh verify "$VERSION" "$RUNNER_TEMP/npm-release"
+      - name: Smoke test the packaged Linux binary without FUSE
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$smoke_dir"' EXIT
+          tar -xzf "$RUNNER_TEMP/npm-release/puu-install-linux-x64-$VERSION.tgz" \
+            -C "$smoke_dir" package/bin/puu-install.AppImage
+          actual="$(APPIMAGE_EXTRACT_AND_RUN=1 "$smoke_dir/package/bin/puu-install.AppImage" --version)"
+          test "$actual" = "puu-install $VERSION"
+      - name: Publish exact tarballs to npm with provenance
+        env:
+          VERSION: ${{ inputs.version }}
+          NPM_CONFIG_LOGLEVEL: verbose
+        run: |
+          : "${ACTIONS_ID_TOKEN_REQUEST_URL:?GitHub OIDC request URL is unavailable}"
+          : "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:?GitHub OIDC request token is unavailable}"
+          .npm-publisher/scripts/publish-npm-provenance.sh publish "$VERSION" "$RUNNER_TEMP/npm-release"

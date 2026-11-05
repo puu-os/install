@@ -42,7 +42,7 @@ fi
 status=0
 for arch in arm64 amd64; do
   platform="linux/$arch"
-  image="puu-installer-builder:$arch"
+  image="puu-install-builder:$arch"
   platform_args=(--platform "$platform")
   if [[ "$engine" == container && "$arch" == amd64 ]]; then
     platform_args+=(--rosetta)
