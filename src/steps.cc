@@ -65,17 +65,6 @@ std::filesystem::path InTarget(const std::filesystem::path& path) {
   return std::filesystem::path(kTargetMount) / path.relative_path();
 }
 
-StatusOr<std::filesystem::path> StateRoot() {
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
-                       DeploymentRoot(kTargetMount));
-  std::filesystem::path state = deployment.parent_path().parent_path();
-  if (state.empty() || state == deployment) {
-    return InternalError("deployment root has unexpected path: {}",
-                         deployment.string());
-  }
-  return state;
-}
-
 StatusOr<DiskLayout*> MutableLayout(Context& context) {
   if (!context.layout.has_value()) {
     return FailedPreconditionError("drive layout is not initialized");
@@ -140,7 +129,6 @@ StatusOr<uint64_t> ValidateSelectedDrive(Context& context) {
       const uint64_t size,
       ValidateTargetDrive(context.drive, context.config, context.hibernate));
   PUU_ASSIGN_OR_RETURN(const std::string id, DriveIdentity(context.drive));
-
   if (context.drive_size == 0) {
     context.drive_id = id;
     context.drive_size = size;
@@ -161,24 +149,12 @@ StatusOr<ImageRef> SourceImageRef(const std::filesystem::path& source) {
   return ImageRef::Parse(fmt::format("{}:{}", transport, source.string()));
 }
 
-// Resolves an absolute in-target path against the OSTree deployment root.
-//
-// The physical sysroot has no /usr or /etc of its own; both live in the
-// deployment, so anything a chrooted helper will see must be resolved here.
-StatusOr<std::filesystem::path> InDeployment(
-    const std::filesystem::path& path) {
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
-                       DeploymentRoot(kTargetMount));
-  return deployment / path.relative_path();
-}
-
 Status RunChrootedHelper(const Runner& runner,
                          const std::filesystem::path& helper,
                          std::string heartbeat, double progress_base,
                          double progress_span) {
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
-                       DeploymentRoot(kTargetMount));
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
+  PUU_ASSIGN_OR_RETURN(const TargetDeployment* target, runner.GetDeployment());
+  const std::filesystem::path& deployment = target->Root();
 
   CleanupStack binds;
   binds.Push([deployment] {
@@ -191,9 +167,9 @@ Status RunChrootedHelper(const Runner& runner,
   // Without this the helper writes into the deployment's empty /var, which
   // ostree-prepare-root shadows with the stateroot's /var at boot, so every
   // change would be silently discarded.
-  const std::filesystem::path var = deployment / "var";
+  const std::filesystem::path var = target->InDeployment("/var");
   PUU_RETURN_IF_ERROR(CreateDirectories(var));
-  PUU_RETURN_IF_ERROR(BindMount(state / "var", var));
+  PUU_RETURN_IF_ERROR(BindMount(target->InState("/var"), var));
   PUU_RETURN_IF_ERROR(MountChrootBinds(deployment));
 
   MarkerProgress progress;
@@ -237,18 +213,19 @@ StatusOr<std::vector<std::string>> ParseManifestRefs(
 
 Status SeedStore(const Runner& runner, const SeedConfig& seed,
                  double progress_base, double progress_span) {
+  PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
+                       runner.GetDeployment());
   const std::string_view name = seed.name.Value();
   if (seed.live_store.has_value() && IsDirectory(*seed.live_store)) {
-    PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
     PUU_RETURN_IF_ERROR(
-        CopyTree(*seed.live_store, state / seed.target.relative_path()));
+        CopyTree(*seed.live_store, deployment->InState(seed.target)));
     InstallationLogger()->info("{}: copied the store from the live image",
                                name);
     return absl::OkStatus();
   }
   if (seed.manifest_path.has_value()) {
-    PUU_ASSIGN_OR_RETURN(const std::filesystem::path manifest,
-                         InDeployment(*seed.manifest_path));
+    const std::filesystem::path manifest =
+        deployment->InDeployment(*seed.manifest_path);
     PUU_ASSIGN_OR_RETURN(const std::vector<std::string> refs,
                          ParseManifestRefs(manifest));
     if (refs.empty()) {
@@ -261,8 +238,8 @@ Status SeedStore(const Runner& runner, const SeedConfig& seed,
     InstallationLogger()->info("{}: nothing to pre-stage", name);
     return absl::OkStatus();
   }
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path helper,
-                       InDeployment(*seed.sync_helper));
+  const std::filesystem::path helper =
+      deployment->InDeployment(*seed.sync_helper);
   if (!IsRegularFile(helper)) {
     InstallationLogger()->info("{}: nothing to pre-stage", name);
     return absl::OkStatus();
@@ -277,26 +254,10 @@ Status SeedStore(const Runner& runner, const SeedConfig& seed,
   return absl::OkStatus();
 }
 
-Status StepSeedStores(Runner& runner) {
-  const std::vector<SeedConfig>& seeds = runner.GetContext().config.seeds;
-  if (seeds.empty()) {
-    return absl::OkStatus();
-  }
-  const auto total = static_cast<double>(seeds.size());
-  for (size_t index = 0; index < seeds.size(); ++index) {
-    const double base = static_cast<double>(index) / total;
-    const double span = 1.0 / total;
-    PUU_RETURN_IF_ERROR(SeedStore(runner, seeds[index], base, span));
-    runner.ReportProgress(static_cast<double>(index + 1) / total);
-  }
-  return absl::OkStatus();
-}
-
-StatusOr<std::filesystem::path> SystemdBootSource() {
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
-                       DeploymentRoot(kTargetMount));
+StatusOr<std::filesystem::path> SystemdBootSource(
+    const TargetDeployment& deployment) {
   const std::array<std::filesystem::path, 2> directories = {
-      deployment / "usr/lib/systemd/boot/efi",
+      deployment.InDeployment("/usr/lib/systemd/boot/efi"),
       std::filesystem::path("/usr/lib/systemd/boot/efi")};
   for (const std::filesystem::path& directory : directories) {
     std::error_code error;
@@ -357,8 +318,7 @@ Status StepDependencies(Runner& runner) {
     return FailedPreconditionError("missing dependencies: {}",
                                    absl::StrJoin(missing, ", "));
   }
-  InstallationLogger()->info("all {} dependencies present",
-                             kDependencies.size());
+  InstallationLogger()->info("all {} dependencies present", required.size());
   return absl::OkStatus();
 }
 
@@ -493,7 +453,6 @@ Status StepFormatSwap(Runner& runner) {
   layout->SetSwapUuid(std::move(uuid));
   return absl::OkStatus();
 }
-
 Status StepFormatHome(Runner& runner) {
   Context& context = runner.GetContext();
   PUU_ASSIGN_OR_RETURN(DiskLayout * layout, MutableLayout(context));
@@ -502,7 +461,6 @@ Status StepFormatHome(Runner& runner) {
   InstallationLogger()->info("formatting {} as ext4 (label {})", part.string(),
                              label);
   Command command("mke2fs");
-
   PUU_RETURN_IF_ERROR(command
                           .Args({"-t", "ext4", "-O", "encrypt", "-F", "-L",
                                  label, part.string()})
@@ -599,7 +557,8 @@ Status StepBootcInstall(Runner& runner) {
       });
     }
   }
-  return command.Run();
+  PUU_RETURN_IF_ERROR(command.Run());
+  return runner.ResolveDeployment(kTargetMount);
 }
 
 Status StepMountHome(Runner& runner) {
@@ -611,15 +570,14 @@ Status StepMountHome(Runner& runner) {
 Status StepConfigureMounts(Runner& runner) {
   const Context& context = runner.GetContext();
   PUU_ASSIGN_OR_RETURN(const DiskLayout* layout, GetLayout(context));
-
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
-                       DeploymentRoot(kTargetMount));
+  PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
+                       runner.GetDeployment());
 
   for (const std::string_view relative : {"efi", "var", "var/home", "etc"}) {
-    PUU_RETURN_IF_ERROR(CreateDirectories(deployment / relative));
+    PUU_RETURN_IF_ERROR(CreateDirectories(deployment->InDeployment(relative)));
   }
 
-  const std::filesystem::path fstab = deployment / "etc/fstab";
+  const std::filesystem::path fstab = deployment->InDeployment("/etc/fstab");
   std::string existing;
   if (Exists(fstab)) {
     PUU_ASSIGN_OR_RETURN(existing, ReadFile(fstab));
@@ -627,8 +585,8 @@ Status StepConfigureMounts(Runner& runner) {
   PUU_ASSIGN_OR_RETURN(const std::string merged, layout->MergeFstab(existing));
   PUU_RETURN_IF_ERROR(WriteFile(fstab, merged, kPublicFileMode));
 
-  const std::filesystem::path zram_conf =
-      deployment / "etc/systemd/zram-generator.conf.d/99-installer.conf";
+  const std::filesystem::path zram_conf = deployment->InDeployment(
+      "/etc/systemd/zram-generator.conf.d/99-installer.conf");
   if (context.hibernate) {
     if (Exists(zram_conf)) {
       std::error_code error;
@@ -650,16 +608,16 @@ Status StepConfigureMounts(Runner& runner) {
 
 Status StepFirstboot(Runner& runner) {
   const IdentityConfig& identity = runner.GetContext().config.identity;
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
-                       DeploymentRoot(kTargetMount));
+  PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
+                       runner.GetDeployment());
 
-  if (!IsRegularFile(deployment / "usr/share/zoneinfo" /
+  if (!IsRegularFile(deployment->InDeployment("/usr/share/zoneinfo") /
                      identity.timezone.Value())) {
     return NotFoundError("timezone not found in target system: {}",
                          identity.timezone.Value());
   }
 
-  const std::filesystem::path etc = deployment / "etc";
+  const std::filesystem::path etc = deployment->InDeployment("/etc");
   PUU_RETURN_IF_ERROR(CreateDirectories(etc));
 
   // These overwrite whatever the image ships. Image defaults are placeholders;
@@ -707,9 +665,9 @@ Status StepConfigureK3s(Runner& runner) {
         "k3s cluster: using image default server configuration");
     return absl::OkStatus();
   }
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
-                       DeploymentRoot(kTargetMount));
-  PUU_RETURN_IF_ERROR(StageK3s(deployment, k3s, std::move(token)));
+  PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
+                       runner.GetDeployment());
+  PUU_RETURN_IF_ERROR(StageK3s(deployment->Root(), k3s, std::move(token)));
   InstallationLogger()->info("k3s cluster: staged {} configuration",
                              K3sRoleName(k3s.role));
   return absl::OkStatus();
@@ -717,6 +675,8 @@ Status StepConfigureK3s(Runner& runner) {
 
 Status StepStageHomedIdentity(Runner& runner) {
   Context& context = runner.GetContext();
+  PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
+                       runner.GetDeployment());
   if (!context.username.has_value()) {
     return InvalidArgumentError(
         "username is required to stage a homed identity");
@@ -753,8 +713,7 @@ Status StepStageHomedIdentity(Runner& runner) {
 
   const std::filesystem::path& configured_path =
       context.config.homed.identity_path;
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
-  const std::filesystem::path target = state / configured_path.relative_path();
+  const std::filesystem::path target = deployment->InState(configured_path);
   PUU_RETURN_IF_ERROR(CreateDirectories(target.parent_path()));
 
   std::string text =
@@ -775,9 +734,27 @@ Status StepStageHomedIdentity(Runner& runner) {
   return absl::OkStatus();
 }
 
+Status StepSeedStores(Runner& runner) {
+  const std::vector<SeedConfig>& seeds = runner.GetContext().config.seeds;
+  if (seeds.empty()) {
+    return absl::OkStatus();
+  }
+  const auto total = static_cast<double>(seeds.size());
+  for (size_t index = 0; index < seeds.size(); ++index) {
+    const double base = static_cast<double>(index) / total;
+    const double span = 1.0 / total;
+    PUU_RETURN_IF_ERROR(SeedStore(runner, seeds[index], base, span));
+    runner.ReportProgress(static_cast<double>(index + 1) / total);
+  }
+  return absl::OkStatus();
+}
+
 Status StepInstallBootloader(Runner& runner) {
   PUU_RETURN_IF_ERROR(MountEfi(runner));
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path source, SystemdBootSource());
+  PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
+                       runner.GetDeployment());
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path source,
+                       SystemdBootSource(*deployment));
   PUU_ASSIGN_OR_RETURN(const Arch arch, HostArch());
   const std::string suffix(ArchEfiSuffix(arch));
   std::string upper = suffix;
@@ -820,9 +797,10 @@ Status StepStageEspBoot(Runner& runner) {
   return absl::OkStatus();
 }
 
-Status StepSign(Runner& /*runner*/) {
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
-  KeyStore store(state / "var");
+Status StepSign(Runner& runner) {
+  PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
+                       runner.GetDeployment());
+  KeyStore store(deployment->InState("/var"));
   PUU_RETURN_IF_ERROR(store.EnsureKeys());
   PUU_ASSIGN_OR_RETURN(const KeyPair database, store.Get(KeyKind::kDatabase));
   PUU_ASSIGN_OR_RETURN(const std::vector<std::filesystem::path> binaries,
@@ -856,9 +834,10 @@ Status StepSign(Runner& /*runner*/) {
   return absl::OkStatus();
 }
 
-Status StepEnrollKeys(Runner& /*runner*/) {
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path state, StateRoot());
-  KeyStore store(state / "var");
+Status StepEnrollKeys(Runner& runner) {
+  PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
+                       runner.GetDeployment());
+  KeyStore store(deployment->InState("/var"));
   PUU_RETURN_IF_ERROR(store.EnsureKeys());
 
   Status status = store.Enroll();

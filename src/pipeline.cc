@@ -261,6 +261,7 @@ StatusOr<std::vector<KernelArg>> InstallKernelArgs(const DiskLayout& layout,
   for (const KernelArg& arg : config.kernel_args) {
     args.push_back(arg);
   }
+
   const auto configured =
       config.serial_console.find(std::string(ArchName(machine)));
   if (configured != config.serial_console.end()) {
@@ -269,7 +270,7 @@ StatusOr<std::vector<KernelArg>> InstallKernelArgs(const DiskLayout& layout,
   return args;
 }
 
-StatusOr<std::filesystem::path> DeploymentRoot(
+StatusOr<TargetDeployment> TargetDeployment::Resolve(
     const std::filesystem::path& target) {
   const std::filesystem::path deploy = target / "ostree/deploy";
   std::error_code error;
@@ -282,36 +283,60 @@ StatusOr<std::filesystem::path> DeploymentRoot(
   std::vector<std::filesystem::path> found;
   const std::filesystem::directory_iterator end;
   for (; os_entries != end; os_entries.increment(error)) {
-    if (error) {
-      return FilesystemError(
-          error, fmt::format("read ostree deployments at {}", deploy.string()));
-    }
-
-    std::error_code skipped;
-    std::filesystem::directory_iterator deployments(
-        os_entries->path() / "deploy", skipped);
-    if (skipped) {
+    const std::filesystem::path directory = os_entries->path() / "deploy";
+    std::filesystem::directory_iterator deployments(directory, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        error == std::errc::not_a_directory) {
+      error.clear();
       continue;
     }
-    for (; deployments != end && !skipped; deployments.increment(skipped)) {
-      const std::filesystem::path path = deployments->path();
-      if (!IsDirectory(path)) {
-        continue;
-      }
-
-      if (path.filename().string().ends_with(".origin")) {
-        continue;
-      }
-      found.push_back(path);
+    if (error) {
+      return FilesystemError(error, fmt::format("read ostree deployments at {}",
+                                                directory.string()));
     }
+    for (; deployments != end; deployments.increment(error)) {
+      const std::filesystem::path path = deployments->path();
+      const bool is_directory = deployments->is_directory(error);
+      if (error) {
+        return FilesystemError(
+            error, fmt::format("inspect ostree deployment {}", path.string()));
+      }
+      if (is_directory && !path.filename().string().ends_with(".origin")) {
+        found.push_back(path);
+      }
+    }
+    if (error) {
+      return FilesystemError(error, fmt::format("read ostree deployments at {}",
+                                                directory.string()));
+    }
+  }
+  if (error) {
+    return FilesystemError(
+        error, fmt::format("read ostree deployments at {}", deploy.string()));
   }
   if (found.empty()) {
     return NotFoundError(
         "ostree did not report the installed deployment root under {}",
         deploy.string());
   }
-  std::ranges::sort(found);
-  return found.front();
+  if (found.size() != 1) {
+    return FailedPreconditionError(
+        "expected one installed deployment under {}, found {}", deploy.string(),
+        found.size());
+  }
+  std::filesystem::path root = std::move(found.front());
+  std::filesystem::path state_root = root.parent_path().parent_path();
+  return TargetDeployment(std::move(root), std::move(state_root));
+}
+
+std::filesystem::path TargetDeployment::InDeployment(
+    const std::filesystem::path& path) const {
+  return root_ / path.relative_path();
+}
+
+std::filesystem::path TargetDeployment::InState(
+    const std::filesystem::path& path) const {
+  return state_root_ / path.relative_path();
 }
 
 }  // namespace puu

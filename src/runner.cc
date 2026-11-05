@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <exception>
+#include <filesystem>
 #include <span>
 
 #include <absl/status/status.h>
@@ -16,6 +17,7 @@
 namespace puu {
 
 Status Runner::Execute(std::span<const Step> steps) {
+  deployment_.reset();
   for (size_t index = 0; index < steps.size(); ++index) {
     const Step& step = steps[index];
 
@@ -61,6 +63,19 @@ Status Runner::RunStep(const Step& step, size_t index) {
   }
   ReportProgress(1.0);
   return absl::OkStatus();
+}
+
+Status Runner::ResolveDeployment(const std::filesystem::path& target) {
+  deployment_.reset();
+  PUU_ASSIGN_OR_RETURN(deployment_, TargetDeployment::Resolve(target));
+  return absl::OkStatus();
+}
+
+StatusOr<const TargetDeployment*> Runner::GetDeployment() const {
+  if (!deployment_.has_value()) {
+    return FailedPreconditionError("target deployment is not initialized");
+  }
+  return &*deployment_;
 }
 
 void Runner::ReportProgress(double fraction) const {

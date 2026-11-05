@@ -9,6 +9,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <spdlog/logger.h>
@@ -91,9 +92,24 @@ class CleanupStack {
 StatusOr<std::vector<KernelArg>> InstallKernelArgs(const DiskLayout& layout,
                                                    const Config& config);
 
-// Locates the ostree deployment directory below the target root.
-StatusOr<std::filesystem::path> DeploymentRoot(
-    const std::filesystem::path& target);
+class TargetDeployment {
+ public:
+  [[nodiscard]] static StatusOr<TargetDeployment> Resolve(
+      const std::filesystem::path& target);
+
+  [[nodiscard]] const std::filesystem::path& Root() const { return root_; }
+  [[nodiscard]] std::filesystem::path InDeployment(
+      const std::filesystem::path& path) const;
+  [[nodiscard]] std::filesystem::path InState(
+      const std::filesystem::path& path) const;
+
+ private:
+  TargetDeployment(std::filesystem::path root, std::filesystem::path state_root)
+      : root_(std::move(root)), state_root_(std::move(state_root)) {}
+
+  std::filesystem::path root_;
+  std::filesystem::path state_root_;
+};
 
 }  // namespace puu
 

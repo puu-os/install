@@ -5,12 +5,15 @@
 #define PUU_STEP_H_
 
 #include <cstddef>
+#include <filesystem>
 #include <functional>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <utility>
 
 #include "context.h"
+#include "pipeline.h"
 #include "status.h"
 
 namespace puu {
@@ -29,13 +32,13 @@ struct Step {
 
   bool (*enabled)(const Context& context) = nullptr;
 
-  [[nodiscard]] bool IsEnabled(const Context& context) const {
-    return enabled == nullptr || enabled(context);
-  }
-
   // Writing the partition table destroys the previous contents of the drive.
   // Cancellation is refused from this step onwards.
   bool point_of_no_return = false;
+
+  [[nodiscard]] bool IsEnabled(const Context& context) const {
+    return enabled == nullptr || enabled(context);
+  }
 };
 
 std::span<const Step> Steps();
@@ -43,7 +46,7 @@ std::span<const Step> Steps();
 // Drives the pipeline and mediates between steps and the UI.
 //
 // The runner owns the Context for the duration of the run. Steps mutate it in
-// place; in particular the format steps fill in Context::parts.
+// place; in particular the format steps fill in Context::layout.
 class Runner {
  public:
   // Reports progress within the current step as a fraction in [0, 1].
@@ -61,6 +64,9 @@ class Runner {
 
   Context& GetContext() { return context_; }
   [[nodiscard]] const Context& GetContext() const { return context_; }
+
+  Status ResolveDeployment(const std::filesystem::path& target);
+  [[nodiscard]] StatusOr<const TargetDeployment*> GetDeployment() const;
 
   void SetProgressCallback(ProgressCallback callback) {
     progress_callback_ = std::move(callback);
@@ -87,6 +93,7 @@ class Runner {
   Status RunStep(const Step& step, size_t index);
 
   Context context_;
+  std::optional<TargetDeployment> deployment_;
   ProgressCallback progress_callback_;
   SkipCallback skip_callback_;
   CancelCallback cancel_callback_;
