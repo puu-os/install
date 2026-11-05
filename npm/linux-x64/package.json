@@ -1,6 +1,6 @@
 {
   "name": "@puu/install-linux-x64",
-  "version": "1.0.64",
+  "version": "1.1.0",
   "description": "Puu OS install AppImage for Linux x64",
   "license": "GPL-2.0-or-later",
   "repository": {

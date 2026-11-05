@@ -1,6 +1,6 @@
 {
   "name": "@puu/install",
-  "version": "1.0.64",
+  "version": "1.1.0",
   "description": "Puu OS install",
   "license": "GPL-2.0-or-later",
   "repository": {
@@ -23,8 +23,8 @@
     "linux"
   ],
   "optionalDependencies": {
-    "@puu/install-linux-arm64": "1.0.64",
-    "@puu/install-linux-x64": "1.0.64"
+    "@puu/install-linux-arm64": "1.1.0",
+    "@puu/install-linux-x64": "1.1.0"
   },
   "publishConfig": {
     "access": "public"
