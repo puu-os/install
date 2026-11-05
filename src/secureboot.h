@@ -38,10 +38,10 @@ struct KeyPair {
   StatusOr<bool> Verify(const std::filesystem::path& binary) const;
 };
 
-// The key store written under the target root, compatible with sbctl's layout.
+// A key store in the supplied directory, compatible with sbctl's layout.
 class KeyStore {
  public:
-  explicit KeyStore(std::filesystem::path root);
+  explicit KeyStore(std::filesystem::path directory);
 
   // Loads the existing keys, or generates a fresh set when any is missing.
   //
@@ -62,7 +62,7 @@ class KeyStore {
   Status Enroll() const;
 
  private:
-  std::filesystem::path root_;
+  std::filesystem::path directory_;
 };
 
 // Every *.efi file under `esp`, sorted, so signing order is reproducible.

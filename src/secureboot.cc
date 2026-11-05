@@ -78,8 +78,6 @@ constexpr uint16_t kWinCertTypeEfiGuid = 0x0ef1;
 
 constexpr uint32_t kAuthVariableAttributes = 0x1 | 0x2 | 0x4 | 0x20;
 
-constexpr std::string_view kKeyStoreSubdir = "var/lib/sbctl";
-
 constexpr std::array<uint8_t, 39> kSpcPeImageDataValue = {
     0x30, 0x25, 0x03, 0x01, 0x00, 0xa0, 0x20, 0xa2, 0x1e, 0x80,
     0x1c, 0x00, 0x3c, 0x00, 0x3c, 0x00, 0x3c, 0x00, 0x4f, 0x00,
@@ -912,12 +910,12 @@ StatusOr<std::vector<std::pair<size_t, size_t>>> AuthenticodeSkippedRanges(
   return ranges;
 }
 
-KeyStore::KeyStore(std::filesystem::path root) : root_(std::move(root)) {}
+KeyStore::KeyStore(std::filesystem::path directory)
+    : directory_(std::move(directory)) {}
 
 StatusOr<KeyPair> KeyStore::Get(KeyKind kind) const {
   const std::string name{KeyKindName(kind)};
-  const std::filesystem::path directory =
-      root_ / kKeyStoreSubdir / "keys" / name;
+  const std::filesystem::path directory = directory_ / "keys" / name;
   KeyPair pair{.key_path = directory / fmt::format("{}.key", name),
                .certificate_path = directory / fmt::format("{}.pem", name)};
   if (!IsRegularFile(pair.key_path) || !IsRegularFile(pair.certificate_path)) {
@@ -928,7 +926,7 @@ StatusOr<KeyPair> KeyStore::Get(KeyKind kind) const {
 }
 
 StatusOr<EfiGuid> KeyStore::OwnerGuid() const {
-  const std::filesystem::path path = root_ / kKeyStoreSubdir / "GUID";
+  const std::filesystem::path path = directory_ / "GUID";
   PUU_ASSIGN_OR_RETURN(const std::string text, ReadFile(path));
   const std::string_view trimmed = Trim(text);
   if (trimmed.empty()) {
@@ -945,7 +943,7 @@ StatusOr<EfiGuid> KeyStore::OwnerGuid() const {
 Status KeyStore::EnsureKeys() {
   static constexpr std::array<KeyKind, 3> kKinds = {
       KeyKind::kPlatform, KeyKind::kKeyExchange, KeyKind::kDatabase};
-  const std::filesystem::path base = root_ / kKeyStoreSubdir;
+  const std::filesystem::path base = directory_;
   const std::filesystem::path key_root = base / "keys";
 
   bool complete = true;

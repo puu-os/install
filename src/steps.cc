@@ -800,7 +800,7 @@ Status StepStageEspBoot(Runner& runner) {
 Status StepSign(Runner& runner) {
   PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
                        runner.GetDeployment());
-  KeyStore store(deployment->InState("/var"));
+  KeyStore store(deployment->InState("/var/lib/sbctl"));
   PUU_RETURN_IF_ERROR(store.EnsureKeys());
   PUU_ASSIGN_OR_RETURN(const KeyPair database, store.Get(KeyKind::kDatabase));
   PUU_ASSIGN_OR_RETURN(const std::vector<std::filesystem::path> binaries,
@@ -837,7 +837,7 @@ Status StepSign(Runner& runner) {
 Status StepEnrollKeys(Runner& runner) {
   PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
                        runner.GetDeployment());
-  KeyStore store(deployment->InState("/var"));
+  KeyStore store(deployment->InState("/var/lib/sbctl"));
   PUU_RETURN_IF_ERROR(store.EnsureKeys());
 
   Status status = store.Enroll();
