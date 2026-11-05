@@ -1368,7 +1368,7 @@ void Installer::Impl::StartInstall() {
 
   Context worker_context = context_.Clone();
 
-  worker_context.parts = DerivedPartitions{};
+  worker_context.layout.reset();
 
   if (install_thread_.joinable()) {
     install_thread_.join();

@@ -59,6 +59,10 @@ class EfiGuid {
     return FromParts(0x0fc63daf, 0x8483, 0x4772,
                      {0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4});
   }
+  static constexpr EfiGuid LinuxSwapType() {
+    return FromParts(0x0657fd6d, 0xa4ab, 0x43c4,
+                     {0x84, 0xe5, 0x09, 0x33, 0xc8, 0x4b, 0x4f, 0x4f});
+  }
   // Standard EFI X.509 certificate signature list type GUID:
   // a5c059a1-94e4-4aa7-87b5-ab155c2bf072.
   static constexpr EfiGuid CertX509() {

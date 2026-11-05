@@ -48,30 +48,6 @@ constexpr std::array<std::pair<std::string_view, std::string_view>, 4>
     kChrootBindMounts = {
         {{"/proc", "proc"}, {"/sys", "sys"}, {"/dev", "dev"}, {"/run", "run"}}};
 
-constexpr std::array<std::string_view, 5> kFixedKernelArgs = {
-    "rw", "vt.global_cursor_default=0", "console=tty0", "threadirqs",
-    "preempt=full"};
-
-std::string_view FstabMountPoint(std::string_view line) {
-  size_t position = line.find_first_not_of(" \t");
-  if (position == std::string_view::npos || line[position] == '#') {
-    return {};
-  }
-  std::string_view field;
-  for (int index = 0; index < 2; ++index) {
-    position = line.find_first_not_of(" \t", position);
-    if (position == std::string_view::npos) {
-      return {};
-    }
-    const size_t end = line.find_first_of(" \t", position);
-    field = line.substr(position, end == std::string_view::npos
-                                      ? std::string_view::npos
-                                      : end - position);
-    position = end;
-  }
-  return field;
-}
-
 StatusOr<std::vector<std::filesystem::path>> TeardownMountPoints() {
   PUU_ASSIGN_OR_RETURN(const Mounts mounts, Mounts::Read());
   return mounts.Below(kTargetMount);
@@ -262,58 +238,34 @@ void CleanupStack::Push(std::function<void()> cleanup) {
 
 void CleanupStack::Release() { cleanups_.clear(); }
 
-std::string MergeFstab(std::string_view existing, std::string_view efi_partuuid,
-                       std::string_view home_uuid) {
-  constexpr std::array<std::string_view, 3> kManaged = {"/", "/efi",
-                                                        "/var/home"};
-  std::string merged;
-  while (!existing.empty()) {
-    const size_t newline = existing.find('\n');
-    std::string_view line = existing.substr(0, newline);
-    existing = newline == std::string_view::npos ? std::string_view()
-                                                 : existing.substr(newline + 1);
-    if (line.ends_with('\r')) {
-      line.remove_suffix(1);
-    }
-    if (std::ranges::find(kManaged, FstabMountPoint(line)) != kManaged.end()) {
-      continue;
-    }
-    merged.append(line).push_back('\n');
-  }
-  merged += fmt::format(
-      "PARTUUID={} /efi vfat fmask=0077,dmask=0077,nofail 0 2\n", efi_partuuid);
-  merged += fmt::format("UUID={} /var/home ext4 defaults 0 2\n", home_uuid);
-  return merged;
-}
-
-StatusOr<std::vector<KernelArg>> InstallKernelArgs(std::string_view root_uuid,
+StatusOr<std::vector<KernelArg>> InstallKernelArgs(const DiskLayout& layout,
                                                    const Config& config) {
+  PUU_ASSIGN_OR_RETURN(const std::string_view root_uuid, layout.RootUuid());
+  PUU_ASSIGN_OR_RETURN(const std::optional<std::string_view> swap_uuid,
+                       layout.SwapUuid());
   PUU_ASSIGN_OR_RETURN(const Arch machine, HostArch());
   std::vector<KernelArg> args;
-  args.reserve(kFixedKernelArgs.size() + 2);
+  args.reserve(config.kernel_args.size() + 5);
   PUU_ASSIGN_OR_RETURN(
       KernelArg root, KernelArg::Parse(fmt::format("root=UUID={}", root_uuid)));
   args.push_back(std::move(root));
-  for (const std::string_view text : kFixedKernelArgs) {
-    PUU_ASSIGN_OR_RETURN(KernelArg arg, KernelArg::Parse(text));
-    args.push_back(std::move(arg));
+  PUU_ASSIGN_OR_RETURN(KernelArg rw, KernelArg::Parse("rw"));
+  args.push_back(std::move(rw));
+  if (swap_uuid.has_value()) {
+    PUU_ASSIGN_OR_RETURN(KernelArg resume, KernelArg::Parse(fmt::format(
+                                               "resume=UUID={}", *swap_uuid)));
+    args.push_back(std::move(resume));
+    PUU_ASSIGN_OR_RETURN(KernelArg no_zram, KernelArg::Parse("systemd.zram=0"));
+    args.push_back(std::move(no_zram));
   }
   for (const KernelArg& arg : config.kernel_args) {
     args.push_back(arg);
   }
-
   const auto configured =
       config.serial_console.find(std::string(ArchName(machine)));
   if (configured != config.serial_console.end()) {
     args.push_back(configured->second);
-    return args;
   }
-
-  const std::string_view fallback = machine == Arch::kX8664
-                                        ? "console=ttyS0,115200"
-                                        : "console=ttyAMA0,115200";
-  PUU_ASSIGN_OR_RETURN(KernelArg console, KernelArg::Parse(fallback));
-  args.push_back(std::move(console));
   return args;
 }
 

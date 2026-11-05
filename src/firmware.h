@@ -14,6 +14,7 @@
 #include "config.h"
 #include "context.h"
 #include "guid.h"
+#include "partition.h"
 #include "status.h"
 
 namespace puu {

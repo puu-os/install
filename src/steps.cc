@@ -76,13 +76,29 @@ StatusOr<std::filesystem::path> StateRoot() {
   return state;
 }
 
+StatusOr<DiskLayout*> MutableLayout(Context& context) {
+  if (!context.layout.has_value()) {
+    return FailedPreconditionError("drive layout is not initialized");
+  }
+  return &*context.layout;
+}
+
+StatusOr<const DiskLayout*> GetLayout(const Context& context) {
+  if (!context.layout.has_value()) {
+    return FailedPreconditionError("drive layout is not initialized");
+  }
+  return &*context.layout;
+}
+
 Status MountEfi(const Runner& runner) {
-  return MountTarget(runner.GetContext().parts.efi_part, kTargetEfiMount,
-                     "vfat", "fmask=0077,dmask=0077");
+  PUU_ASSIGN_OR_RETURN(const DiskLayout* layout,
+                       GetLayout(runner.GetContext()));
+  return MountTarget(layout->EfiDevice(), kTargetEfiMount, "vfat",
+                     "fmask=0077,dmask=0077");
 }
 
 StatusOr<uint64_t> ValidateTargetDrive(const std::filesystem::path& drive,
-                                       const Config& config) {
+                                       const Config& config, bool hibernate) {
   std::error_code error;
   const std::filesystem::file_status status =
       std::filesystem::status(drive, error);
@@ -101,12 +117,14 @@ StatusOr<uint64_t> ValidateTargetDrive(const std::filesystem::path& drive,
                                    BusyReasonText(*busy));
   }
   PUU_ASSIGN_OR_RETURN(const uint64_t size, DriveSizeBytes(drive));
-  PUU_ASSIGN_OR_RETURN(const uint64_t minimum, config.MinTargetSizeBytes());
+  PUU_ASSIGN_OR_RETURN(const uint64_t minimum,
+                       DiskLayout::MinimumDriveBytes(config, hibernate));
   if (size < minimum) {
     return FailedPreconditionError(
-        "'{}' is too small: {} detected, need at least {} for EFI, root and "
-        "home partitions",
-        drive.string(), HumanSize(size), HumanSize(minimum));
+        "'{}' is too small: {} detected, need at least {} for {}",
+        drive.string(), HumanSize(size), HumanSize(minimum),
+        hibernate ? "EFI, root, swap and home partitions"
+                  : "EFI, root and home partitions");
   }
   return size;
 }
@@ -118,8 +136,9 @@ StatusOr<uint64_t> ValidateTargetDrive(const std::filesystem::path& drive,
 // udev cannot identify is matched on size alone, which is weaker but still
 // catches the common case of a swapped removable disk.
 StatusOr<uint64_t> ValidateSelectedDrive(Context& context) {
-  PUU_ASSIGN_OR_RETURN(const uint64_t size,
-                       ValidateTargetDrive(context.drive, context.config));
+  PUU_ASSIGN_OR_RETURN(
+      const uint64_t size,
+      ValidateTargetDrive(context.drive, context.config, context.hibernate));
   PUU_ASSIGN_OR_RETURN(const std::string id, DriveIdentity(context.drive));
 
   if (context.drive_size == 0) {
@@ -362,14 +381,17 @@ Status StepValidateDrive(Runner& runner) {
                          context.source_image->string());
   }
 
-  context.parts.efi_part = PartitionPath(context.drive, kEfiPartitionNumber);
-  context.parts.root_part = PartitionPath(context.drive, kRootPartitionNumber);
-  context.parts.home_part = PartitionPath(context.drive, kHomePartitionNumber);
+  PUU_ASSIGN_OR_RETURN(
+      context.layout,
+      DiskLayout::Plan(context.drive, context.config, context.hibernate));
 
-  InstallationLogger()->info(
-      "target {} ({}; {}, {}, {})", context.drive.string(), HumanSize(size),
-      context.parts.efi_part.string(), context.parts.root_part.string(),
-      context.parts.home_part.string());
+  std::vector<std::string> devices;
+  devices.reserve(context.layout->DevicePaths().size());
+  for (const std::filesystem::path& path : context.layout->DevicePaths()) {
+    devices.push_back(path.string());
+  }
+  InstallationLogger()->info("target {} ({}; {})", context.drive.string(),
+                             HumanSize(size), absl::StrJoin(devices, ", "));
   return absl::OkStatus();
 }
 
@@ -394,49 +416,50 @@ Status StepVerifyImage(Runner& runner) {
 
 Status StepPartition(Runner& runner) {
   Context& context = runner.GetContext();
-
+  PUU_ASSIGN_OR_RETURN(DiskLayout * layout, MutableLayout(context));
   PUU_RETURN_IF_ERROR(ValidateSelectedDrive(context).status());
-  PUU_ASSIGN_OR_RETURN(context.parts.layout,
-                       PartitionDrive(context.drive, context.config));
+  PUU_RETURN_IF_ERROR(layout->WriteGpt());
 
   PUU_RETURN_IF_ERROR(WaitForUdevSettle(kDeviceTimeout));
-  for (const std::filesystem::path* part :
-       {&context.parts.efi_part, &context.parts.root_part,
-        &context.parts.home_part}) {
-    PUU_RETURN_IF_ERROR(WaitForBlockDevice(*part, kDeviceTimeout));
+  for (const std::filesystem::path& part : layout->DevicePaths()) {
+    PUU_RETURN_IF_ERROR(WaitForBlockDevice(part, kDeviceTimeout));
   }
   return absl::OkStatus();
 }
 
 Status StepFormatEfi(Runner& runner) {
   Context& context = runner.GetContext();
-  const std::filesystem::path part = context.parts.efi_part;
+  PUU_ASSIGN_OR_RETURN(DiskLayout * layout, MutableLayout(context));
+  const std::filesystem::path& part = layout->EfiDevice();
   InstallationLogger()->info("formatting {} as FAT32 (label EFI)",
                              part.string());
   Command command("mkfs.fat");
   PUU_RETURN_IF_ERROR(command.Args({"-F32", "-n", "EFI", part.string()}).Run());
 
-  PUU_ASSIGN_OR_RETURN(context.parts.efi_uuid,
+  PUU_ASSIGN_OR_RETURN(std::string part_uuid,
                        ProbeBlockTag(part, BlockTag::kPartUuid));
+  layout->SetEfiPartUuid(std::move(part_uuid));
   return absl::OkStatus();
 }
 
 Status StepFormatRoot(Runner& runner) {
   Context& context = runner.GetContext();
-  const std::filesystem::path part = context.parts.root_part;
+  PUU_ASSIGN_OR_RETURN(DiskLayout * layout, MutableLayout(context));
+  const std::filesystem::path& part = layout->RootDevice();
   const std::string label = context.config.labels.root.Value();
   InstallationLogger()->info("formatting {} as XFS (label {})", part.string(),
                              label);
   Command command("mkfs.xfs");
   PUU_RETURN_IF_ERROR(command.Args({"-f", "-L", label, part.string()}).Run());
-  PUU_ASSIGN_OR_RETURN(context.parts.root_uuid,
-                       ProbeBlockTag(part, BlockTag::kUuid));
+  PUU_ASSIGN_OR_RETURN(std::string uuid, ProbeBlockTag(part, BlockTag::kUuid));
+  layout->SetRootUuid(std::move(uuid));
   return absl::OkStatus();
 }
 
 Status StepFormatHome(Runner& runner) {
   Context& context = runner.GetContext();
-  const std::filesystem::path part = context.parts.home_part;
+  PUU_ASSIGN_OR_RETURN(DiskLayout * layout, MutableLayout(context));
+  const std::filesystem::path& part = layout->HomeDevice();
   const std::string label = context.config.labels.home.Value();
   InstallationLogger()->info("formatting {} as ext4 (label {})", part.string(),
                              label);
@@ -446,22 +469,21 @@ Status StepFormatHome(Runner& runner) {
                           .Args({"-t", "ext4", "-O", "encrypt", "-F", "-L",
                                  label, part.string()})
                           .Run());
-  PUU_ASSIGN_OR_RETURN(context.parts.home_uuid,
-                       ProbeBlockTag(part, BlockTag::kUuid));
+  PUU_ASSIGN_OR_RETURN(std::string uuid, ProbeBlockTag(part, BlockTag::kUuid));
+  layout->SetHomeUuid(std::move(uuid));
   return absl::OkStatus();
 }
 
 Status StepMount(Runner& runner) {
-  return MountTarget(runner.GetContext().parts.root_part, kTargetMount, "xfs",
-                     "");
+  PUU_ASSIGN_OR_RETURN(const DiskLayout* layout,
+                       GetLayout(runner.GetContext()));
+  return MountTarget(layout->RootDevice(), kTargetMount, "xfs", "");
 }
 
 Status StepBootcInstall(Runner& runner) {
   Context& context = runner.GetContext();
-  if (context.parts.root_uuid.empty()) {
-    return FailedPreconditionError(
-        "root partition UUID is unset; the root filesystem was not formatted");
-  }
+  PUU_ASSIGN_OR_RETURN(const DiskLayout* layout, GetLayout(context));
+  PUU_RETURN_IF_ERROR(layout->RootUuid().status());
   if (!context.source_image.has_value() && !RunningInContainer()) {
     return FailedPreconditionError(
         "no local bootc source image found; expected {}/image.tar",
@@ -504,9 +526,8 @@ Status StepBootcInstall(Runner& runner) {
   args.emplace_back("--bootloader");
   args.emplace_back("none");
   args.emplace_back("--skip-finalize");
-  PUU_ASSIGN_OR_RETURN(
-      const std::vector<KernelArg> kernel_args,
-      InstallKernelArgs(context.parts.root_uuid, context.config));
+  PUU_ASSIGN_OR_RETURN(const std::vector<KernelArg> kernel_args,
+                       InstallKernelArgs(*layout, context.config));
   for (const KernelArg& argument : kernel_args) {
     args.emplace_back("--karg");
     args.push_back(argument.Value());
@@ -544,17 +565,14 @@ Status StepBootcInstall(Runner& runner) {
 }
 
 Status StepMountHome(Runner& runner) {
-  return MountTarget(runner.GetContext().parts.home_part, kTargetHomeMount,
-                     "ext4", "");
+  PUU_ASSIGN_OR_RETURN(const DiskLayout* layout,
+                       GetLayout(runner.GetContext()));
+  return MountTarget(layout->HomeDevice(), kTargetHomeMount, "ext4", "");
 }
 
 Status StepConfigureMounts(Runner& runner) {
   const Context& context = runner.GetContext();
-  if (context.parts.efi_uuid.empty() || context.parts.home_uuid.empty()) {
-    return FailedPreconditionError(
-        "EFI or home partition UUID is unset; the filesystems were not "
-        "formatted");
-  }
+  PUU_ASSIGN_OR_RETURN(const DiskLayout* layout, GetLayout(context));
 
   PUU_ASSIGN_OR_RETURN(const std::filesystem::path deployment,
                        DeploymentRoot(kTargetMount));
@@ -568,10 +586,8 @@ Status StepConfigureMounts(Runner& runner) {
   if (Exists(fstab)) {
     PUU_ASSIGN_OR_RETURN(existing, ReadFile(fstab));
   }
-  return WriteFile(
-      fstab,
-      MergeFstab(existing, context.parts.efi_uuid, context.parts.home_uuid),
-      kPublicFileMode);
+  PUU_ASSIGN_OR_RETURN(const std::string merged, layout->MergeFstab(existing));
+  return WriteFile(fstab, merged, kPublicFileMode);
 }
 
 Status StepFirstboot(Runner& runner) {
@@ -803,15 +819,11 @@ Status StepEnrollKeys(Runner& /*runner*/) {
 
 Status StepNvram(Runner& runner) {
   PUU_RETURN_IF_ERROR(MountEfi(runner));
-  Context& context = runner.GetContext();
-  if (!context.parts.layout.has_value()) {
-    PUU_ASSIGN_OR_RETURN(const EfiPartitionLayout layout,
-                         LoadPartitionLayout(context.drive));
-    context.parts.layout = layout;
-  }
+  const Context& context = runner.GetContext();
+  PUU_ASSIGN_OR_RETURN(const DiskLayout* layout, GetLayout(context));
+  PUU_ASSIGN_OR_RETURN(const EfiPartitionLayout esp, layout->EspLayout());
   PUU_ASSIGN_OR_RETURN(const Arch arch, HostArch());
-  return ManageBootEntry(*context.parts.layout, arch,
-                         context.config.branding.name.Value());
+  return ManageBootEntry(esp, arch, context.config.branding.name.Value());
 }
 
 Status StepFinalCleanup(Runner& /*runner*/) {

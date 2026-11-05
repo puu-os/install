@@ -14,6 +14,7 @@
 #include <spdlog/logger.h>
 
 #include "config.h"
+#include "partition.h"
 #include "status.h"
 
 namespace puu {
@@ -87,15 +88,7 @@ class CleanupStack {
   std::vector<std::function<void()>> cleanups_;
 };
 
-// Merges the installer's entries into an existing fstab.
-//
-// Any previous /efi or /var/home line is dropped first, so re-running does not
-// accumulate duplicates. The ESP is referenced by PARTUUID and home by
-// filesystem UUID.
-std::string MergeFstab(std::string_view existing, std::string_view efi_partuuid,
-                       std::string_view home_uuid);
-
-StatusOr<std::vector<KernelArg>> InstallKernelArgs(std::string_view root_uuid,
+StatusOr<std::vector<KernelArg>> InstallKernelArgs(const DiskLayout& layout,
                                                    const Config& config);
 
 // Locates the ostree deployment directory below the target root.

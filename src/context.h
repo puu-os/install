@@ -11,10 +11,9 @@
 #include <string>
 
 #include "config.h"
-#include "guid.h"
 #include "image.h"
+#include "partition.h"
 #include "secret_string.h"
-
 namespace puu {
 
 // Whether the installer should enrol its own Secure Boot keys. Chosen by the
@@ -39,37 +38,8 @@ struct SetupMode {
   std::string reason;
 };
 
-// GPT geometry of the ESP, including its UniquePartitionGUID, needed to write
-// an EFI boot entry. `unique_guid` is the mixed-endian on-disk form.
-struct EfiPartitionLayout {
-  uint32_t partition_number = 0;
-  uint64_t start_lba = 0;
-  uint64_t size_lba = 0;
-  EfiGuid unique_guid{};
-};
-
-// Partition device paths and identifiers discovered during installation.
-//
-// Ownership note: `efi_uuid` is the ESP's GPT PARTUUID, while `root_uuid` and
-// `home_uuid` are filesystem UUIDs. They are not interchangeable; the ESP is
-// referenced by PARTUUID because it is formatted FAT, which has no stable UUID.
-struct DerivedPartitions {
-  std::filesystem::path efi_part;
-  std::filesystem::path root_part;
-  std::filesystem::path home_part;
-
-  std::string efi_uuid;
-  std::string root_uuid;
-  std::string home_uuid;
-
-  std::optional<EfiPartitionLayout> layout;
-};
-
 // Everything a pipeline run needs. Assembled by the CLI, completed by the UI,
 // then cloned into the worker thread.
-//
-// The worker resets `parts` before running, so partition identifiers always
-// come from the current run's format steps.
 struct Context {
   Context() = default;
   Context(const Context&) = delete;
@@ -92,9 +62,10 @@ struct Context {
     copy.user_password = user_password.Clone();
     copy.user_shell = user_shell;
     copy.secure_boot = secure_boot;
+    copy.hibernate = hibernate;
     copy.k3s_token = k3s_token.Clone();
     copy.k3s_token_file = k3s_token_file;
-    copy.parts = parts;
+    copy.layout = layout;
     return copy;
   }
 
@@ -120,10 +91,11 @@ struct Context {
   UserShell user_shell = UserShell::kBash;
 
   SecureBootMode secure_boot = SecureBootMode::kEnroll;
+  bool hibernate = false;
   SecretString k3s_token;
   std::optional<std::filesystem::path> k3s_token_file;
 
-  DerivedPartitions parts;
+  std::optional<DiskLayout> layout;
 };
 
 }  // namespace puu

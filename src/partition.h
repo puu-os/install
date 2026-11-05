@@ -4,50 +4,85 @@
 #ifndef PUU_PARTITION_H_
 #define PUU_PARTITION_H_
 
-#include <array>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 #include "config.h"
-#include "context.h"
+#include "guid.h"
 #include "status.h"
 
 namespace puu {
 
-// Partition numbers written by PartitionDrive. Fixed, because the ESP layout
-// and the fstab entries refer to them.
-inline constexpr uint32_t kEfiPartitionNumber = 1;
-inline constexpr uint32_t kRootPartitionNumber = 2;
-inline constexpr uint32_t kHomePartitionNumber = 3;
-inline constexpr uint64_t kAlignmentBytes = 1024ULL * 1024;
+struct EfiPartitionLayout {
+  uint32_t partition_number = 0;
+  uint64_t start_lba = 0;
+  uint64_t size_lba = 0;
+  EfiGuid unique_guid{};
+};
 
-uint64_t FirstUsableLba(uint32_t sector_size);
-uint64_t LastUsableLba(uint64_t disk_sectors, uint32_t sector_size);
-StatusOr<std::array<EfiPartitionLayout, 3>> ComputeGptLayout(
-    uint64_t disk_sectors, uint32_t sector_size, uint64_t efi_bytes,
-    uint64_t home_bytes);
+class DiskLayout {
+ public:
+  static StatusOr<uint64_t> SwapBytes();
+  static StatusOr<uint64_t> MinimumDriveBytes(const Config& config,
+                                              bool hibernate);
+  static StatusOr<DiskLayout> Plan(const std::filesystem::path& drive,
+                                   const Config& config, bool hibernate);
 
-// Derives a partition device path from a whole-disk path. Disks whose name ends
-// in a digit take a "p" separator, so /dev/nvme0n1 yields /dev/nvme0n1p1 while
-// /dev/sda yields /dev/sda1.
-std::filesystem::path PartitionPath(const std::filesystem::path& drive,
-                                    uint32_t number);
+  Status WriteGpt();
 
-// Writes a fresh GPT to `drive`: ESP first, home at the end of the disk, root
-// filling the space between.
-//
-// This destroys all existing data. The drive is opened O_EXCL, so the call
-// fails rather than racing another holder. Returns the ESP layout just written,
-// including its unique GUID. On return the kernel has been asked to re-read
-// the partition table.
-StatusOr<EfiPartitionLayout> PartitionDrive(const std::filesystem::path& drive,
-                                            const Config& config);
+  [[nodiscard]] const std::filesystem::path& EfiDevice() const {
+    return efi_device_;
+  }
+  [[nodiscard]] const std::filesystem::path& RootDevice() const {
+    return root_device_;
+  }
+  [[nodiscard]] const std::filesystem::path& HomeDevice() const {
+    return home_device_;
+  }
+  [[nodiscard]] bool HasSwap() const { return swap_device_.has_value(); }
+  [[nodiscard]] StatusOr<std::filesystem::path> SwapDevice() const;
+  [[nodiscard]] std::span<const std::filesystem::path> DevicePaths() const {
+    return device_paths_;
+  }
 
-// Reads the ESP geometry from the partition table on `drive`, for writing an
-// EFI boot entry when the layout was not captured during partitioning.
-StatusOr<EfiPartitionLayout> LoadPartitionLayout(
-    const std::filesystem::path& drive);
+  void SetEfiPartUuid(std::string part_uuid) {
+    efi_part_uuid_ = std::move(part_uuid);
+  }
+  void SetRootUuid(std::string uuid) { root_uuid_ = std::move(uuid); }
+  void SetSwapUuid(std::string uuid) { swap_uuid_ = std::move(uuid); }
+  void SetHomeUuid(std::string uuid) { home_uuid_ = std::move(uuid); }
 
+  [[nodiscard]] StatusOr<std::string_view> RootUuid() const;
+  [[nodiscard]] StatusOr<std::optional<std::string_view>> SwapUuid() const;
+  [[nodiscard]] StatusOr<EfiPartitionLayout> EspLayout() const;
+  [[nodiscard]] StatusOr<std::string> MergeFstab(
+      std::string_view existing) const;
+
+ private:
+  DiskLayout() = default;
+
+  std::filesystem::path drive_;
+  uint64_t efi_bytes_ = 0;
+  uint64_t root_min_bytes_ = 0;
+  uint64_t swap_bytes_ = 0;
+  uint64_t home_bytes_ = 0;
+  std::filesystem::path efi_device_;
+  std::filesystem::path root_device_;
+  std::optional<std::filesystem::path> swap_device_;
+  std::filesystem::path home_device_;
+  std::vector<std::filesystem::path> device_paths_;
+  std::string efi_part_uuid_;
+  std::string root_uuid_;
+  std::string swap_uuid_;
+  std::string home_uuid_;
+  std::optional<EfiPartitionLayout> esp_layout_;
+};
 }  // namespace puu
 
 #endif  // PUU_PARTITION_H_

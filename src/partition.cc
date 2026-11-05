@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <linux/fs.h>
 #include <sys/ioctl.h>
+#include <sys/sysinfo.h>
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -13,9 +14,12 @@
 #include <array>
 #include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -25,7 +29,6 @@
 #include <fmt/format.h>
 
 #include "config.h"
-#include "context.h"
 #include "guid.h"
 #include "le_bytes.h"
 #include "status.h"
@@ -135,29 +138,6 @@ Status WriteAt(const UniqueFd& drive, std::span<const uint8_t> data,
   return absl::OkStatus();
 }
 
-Status ReadAt(const UniqueFd& drive, std::span<uint8_t> buffer,
-              uint64_t offset) {
-  size_t read = 0;
-  while (read < buffer.size()) {
-    const ssize_t count =
-        ::pread(drive.Get(), buffer.data() + read, buffer.size() - read,
-                static_cast<off_t>(offset + read));
-    if (count < 0) {
-      const int error = errno;
-      if (error == EINTR) {
-        continue;
-      }
-      return ErrnoToStatus(error, "read the partition table");
-    }
-    if (count == 0) {
-      return InternalError("unexpected end of device at offset {}",
-                           offset + read);
-    }
-    read += static_cast<size_t>(count);
-  }
-  return absl::OkStatus();
-}
-
 std::vector<uint8_t> ProtectiveMbr(uint32_t sector_size,
                                    uint64_t disk_sectors) {
   std::vector<uint8_t> block(sector_size, 0);
@@ -247,7 +227,15 @@ void EncodePartitionName(std::string_view name, std::span<uint8_t> field) {
     field[2 * i] = character < 0x80 ? character : uint8_t{'?'};
   }
 }
-}  // namespace
+constexpr uint64_t kAlignmentBytes = 1024ULL * 1024;
+
+struct GptSlice {
+  uint32_t partition_number = 0;
+  std::string_view name;
+  EfiGuid type_guid;
+  uint64_t start_lba = 0;
+  uint64_t size_lba = 0;
+};
 
 uint64_t FirstUsableLba(uint32_t sector_size) {
   return kPrimaryEntriesLba +
@@ -259,13 +247,23 @@ uint64_t LastUsableLba(uint64_t disk_sectors, uint32_t sector_size) {
          DivCeil(uint64_t{kEntryCount} * kEntrySize, sector_size) - 1;
 }
 
-StatusOr<std::array<EfiPartitionLayout, 3>> ComputeGptLayout(
+std::filesystem::path PartitionPath(const std::filesystem::path& drive,
+                                    uint32_t number) {
+  std::string path = drive.string();
+  if (!path.empty() &&
+      std::isdigit(static_cast<unsigned char>(path.back())) != 0) {
+    path.push_back('p');
+  }
+  return {path + std::to_string(number)};
+}
+
+StatusOr<std::vector<GptSlice>> ComputeGptSlices(
     uint64_t disk_sectors, uint32_t sector_size, uint64_t efi_bytes,
-    uint64_t home_bytes) {
+    uint64_t root_min_bytes, uint64_t swap_bytes, uint64_t home_bytes) {
   if (sector_size < 512 || sector_size % 512 != 0) {
     return InvalidArgumentError("unusable sector size {}", sector_size);
   }
-  if (efi_bytes == 0 || home_bytes == 0) {
+  if (efi_bytes == 0 || root_min_bytes == 0 || home_bytes == 0) {
     return InvalidArgumentError("partition sizes must be at least one sector");
   }
   const uint64_t entry_sectors =
@@ -295,37 +293,53 @@ StatusOr<std::array<EfiPartitionLayout, 3>> ComputeGptLayout(
 
   const uint64_t home_start =
       AlignDown(last_usable + 1 - home_sectors, alignment);
+  uint64_t root_limit = home_start;
+  uint64_t swap_start = 0;
+  if (swap_bytes > 0) {
+    const uint64_t swap_sectors = DivCeil(swap_bytes, sector_size);
+    if (home_start < first_usable || swap_sectors > home_start - first_usable) {
+      return FailedPreconditionError("no room for the swap partition");
+    }
+    swap_start = AlignDown(home_start - swap_sectors, alignment);
+    root_limit = swap_start;
+  }
+
   const uint64_t root_start = AlignUp(efi_end + 1, alignment);
-  if (home_start < first_usable || home_start <= root_start) {
+  if (root_limit < first_usable || root_limit <= root_start) {
     return FailedPreconditionError("no room for the root partition");
   }
-  const uint64_t root_end = home_start - 1;
-
-  return std::array<EfiPartitionLayout, 3>{
-      EfiPartitionLayout{.partition_number = kEfiPartitionNumber,
-                         .start_lba = efi_start,
-                         .size_lba = efi_end - efi_start + 1},
-      EfiPartitionLayout{.partition_number = kRootPartitionNumber,
-                         .start_lba = root_start,
-                         .size_lba = root_end - root_start + 1},
-      EfiPartitionLayout{.partition_number = kHomePartitionNumber,
-                         .start_lba = home_start,
-                         .size_lba = last_usable - home_start + 1},
-  };
-}
-
-std::filesystem::path PartitionPath(const std::filesystem::path& drive,
-                                    uint32_t number) {
-  std::string path = drive.string();
-
-  if (!path.empty() &&
-      std::isdigit(static_cast<unsigned char>(path.back())) != 0) {
-    path.push_back('p');
+  const uint64_t root_sectors = root_limit - root_start;
+  if (root_sectors < DivCeil(root_min_bytes, sector_size)) {
+    return FailedPreconditionError("no room for the root partition");
   }
-  return {path + std::to_string(number)};
-}
 
-namespace {
+  std::vector<GptSlice> slices;
+  slices.reserve(swap_bytes > 0 ? 4 : 3);
+  uint32_t next_number = 1;
+  slices.push_back(GptSlice{.partition_number = next_number++,
+                            .name = "EFI",
+                            .type_guid = EfiGuid::EspType(),
+                            .start_lba = efi_start,
+                            .size_lba = efi_end - efi_start + 1});
+  slices.push_back(GptSlice{.partition_number = next_number++,
+                            .name = "root",
+                            .type_guid = EfiGuid::LinuxFilesystemType(),
+                            .start_lba = root_start,
+                            .size_lba = root_sectors});
+  if (swap_bytes > 0) {
+    slices.push_back(GptSlice{.partition_number = next_number++,
+                              .name = "swap",
+                              .type_guid = EfiGuid::LinuxSwapType(),
+                              .start_lba = swap_start,
+                              .size_lba = home_start - swap_start});
+  }
+  slices.push_back(GptSlice{.partition_number = next_number,
+                            .name = "home",
+                            .type_guid = EfiGuid::LinuxFilesystemType(),
+                            .start_lba = home_start,
+                            .size_lba = last_usable - home_start + 1});
+  return slices;
+}
 
 Status WipeRange(const UniqueFd& drive, uint64_t offset, uint64_t bytes) {
   static constexpr size_t kChunk = size_t{64} * 1024;
@@ -340,34 +354,115 @@ Status WipeRange(const UniqueFd& drive, uint64_t offset, uint64_t bytes) {
   return absl::OkStatus();
 }
 
+std::string_view FstabField(std::string_view line, int target_field) {
+  size_t position = line.find_first_not_of(" \t");
+  if (position == std::string_view::npos || line[position] == '#') {
+    return {};
+  }
+  std::string_view field;
+  for (int index = 0; index <= target_field; ++index) {
+    position = line.find_first_not_of(" \t", position);
+    if (position == std::string_view::npos) {
+      return {};
+    }
+    const size_t end = line.find_first_of(" \t", position);
+    field = line.substr(position, end == std::string_view::npos
+                                      ? std::string_view::npos
+                                      : end - position);
+    position = end;
+  }
+  return field;
+}
+
 }  // namespace
 
-StatusOr<EfiPartitionLayout> PartitionDrive(const std::filesystem::path& drive,
-                                            const Config& config) {
-  PUU_ASSIGN_OR_RETURN(const UniqueFd file, OpenDrive(drive, O_RDWR | O_EXCL));
-  PUU_ASSIGN_OR_RETURN(const uint32_t sector_size, SectorSize(file, drive));
-  PUU_ASSIGN_OR_RETURN(const uint64_t bytes, DriveBytes(file, drive));
+StatusOr<uint64_t> DiskLayout::SwapBytes() {
+  struct sysinfo info{};
+  if (::sysinfo(&info) != 0) {
+    const int error = errno;
+    return ErrnoToStatus(error, "sysinfo");
+  }
+  const uint64_t unit = info.mem_unit == 0 ? 1 : info.mem_unit;
+  if (info.totalram == 0 ||
+      uint64_t{info.totalram} > std::numeric_limits<uint64_t>::max() / unit) {
+    return InternalError("sysinfo reported an unusable memory size");
+  }
+  constexpr uint64_t kGiB = uint64_t{1} << 30;
+  const uint64_t ram_bytes = uint64_t{info.totalram} * unit;
+  const double ram_gib =
+      static_cast<double>(ram_bytes) / static_cast<double>(kGiB);
+  const double swap_gib = std::ceil(ram_gib + std::sqrt(ram_gib));
+  if (swap_gib >
+      static_cast<double>(std::numeric_limits<uint64_t>::max() / kGiB)) {
+    return InternalError("calculated swap size overflows 64 bits");
+  }
+  return static_cast<uint64_t>(swap_gib) * kGiB;
+}
+
+StatusOr<uint64_t> DiskLayout::MinimumDriveBytes(const Config& config,
+                                                 bool hibernate) {
+  PUU_ASSIGN_OR_RETURN(const uint64_t base, config.MinTargetSizeBytes());
+  if (!hibernate) {
+    return base;
+  }
+  PUU_ASSIGN_OR_RETURN(const uint64_t swap, SwapBytes());
+  if (swap > std::numeric_limits<uint64_t>::max() - base) {
+    return InvalidArgumentError(
+        "partition sizes overflow the addressable range of a drive");
+  }
+  return base + swap;
+}
+
+StatusOr<DiskLayout> DiskLayout::Plan(const std::filesystem::path& drive,
+                                      const Config& config, bool hibernate) {
+  if (drive.empty()) {
+    return InvalidArgumentError("target drive path must not be empty");
+  }
+  PUU_RETURN_IF_ERROR(MinimumDriveBytes(config, hibernate).status());
+
+  DiskLayout layout;
+  layout.drive_ = drive;
+  layout.efi_bytes_ = config.partitions.efi.Bytes();
+  layout.root_min_bytes_ = config.partitions.root_min.Bytes();
+  layout.home_bytes_ = config.partitions.home.Bytes();
+
+  uint32_t next_number = 1;
+  layout.efi_device_ = PartitionPath(drive, next_number++);
+  layout.root_device_ = PartitionPath(drive, next_number++);
+  layout.device_paths_ = {layout.efi_device_, layout.root_device_};
+  if (hibernate) {
+    PUU_ASSIGN_OR_RETURN(layout.swap_bytes_, SwapBytes());
+    layout.swap_device_ = PartitionPath(drive, next_number++);
+    layout.device_paths_.push_back(*layout.swap_device_);
+  }
+  layout.home_device_ = PartitionPath(drive, next_number);
+  layout.device_paths_.push_back(layout.home_device_);
+  return layout;
+}
+
+Status DiskLayout::WriteGpt() {
+  PUU_ASSIGN_OR_RETURN(const UniqueFd file, OpenDrive(drive_, O_RDWR | O_EXCL));
+  PUU_ASSIGN_OR_RETURN(const uint32_t sector_size, SectorSize(file, drive_));
+  PUU_ASSIGN_OR_RETURN(const uint64_t bytes, DriveBytes(file, drive_));
   const uint64_t disk_sectors = bytes / sector_size;
 
   PUU_ASSIGN_OR_RETURN(
-      const auto layout,
-      ComputeGptLayout(disk_sectors, sector_size, config.partitions.efi.Bytes(),
-                       config.partitions.home.Bytes()));
+      const std::vector<GptSlice> slices,
+      ComputeGptSlices(disk_sectors, sector_size, efi_bytes_, root_min_bytes_,
+                       swap_bytes_, home_bytes_));
 
-  constexpr std::array<std::string_view, 3> kNames = {"EFI", "root", "home"};
-  const std::array<EfiGuid, 3> types = {EfiGuid::EspType(),
-                                        EfiGuid::LinuxFilesystemType(),
-                                        EfiGuid::LinuxFilesystemType()};
-
-  EfiPartitionLayout efi = layout[0];
+  EfiPartitionLayout esp;
   std::vector<uint8_t> entries(size_t{kEntryCount} * kEntrySize, 0);
-  for (size_t i = 0; i < layout.size(); ++i) {
+  for (const GptSlice& slice : slices) {
     PUU_ASSIGN_OR_RETURN(const EfiGuid unique, EfiGuid::GenerateRandom());
-    WriteEntry(entries, layout[i].partition_number, types[i], unique,
-               layout[i].start_lba,
-               layout[i].start_lba + layout[i].size_lba - 1, kNames[i]);
-    if (layout[i].partition_number == kEfiPartitionNumber) {
-      efi.unique_guid = unique;
+    WriteEntry(entries, slice.partition_number, slice.type_guid, unique,
+               slice.start_lba, slice.start_lba + slice.size_lba - 1,
+               slice.name);
+    if (slice.type_guid == EfiGuid::EspType()) {
+      esp = EfiPartitionLayout{.partition_number = slice.partition_number,
+                               .start_lba = slice.start_lba,
+                               .size_lba = slice.size_lba,
+                               .unique_guid = unique};
     }
   }
 
@@ -387,9 +482,9 @@ StatusOr<EfiPartitionLayout> PartitionDrive(const std::filesystem::path& drive,
   const std::vector<uint8_t> mbr = ProtectiveMbr(sector_size, disk_sectors);
 
   constexpr uint64_t kSignatureWipeBytes = uint64_t{1024} * 1024;
-  for (const EfiPartitionLayout& part : layout) {
-    const uint64_t start_byte = part.start_lba * sector_size;
-    const uint64_t size_bytes = part.size_lba * sector_size;
+  for (const GptSlice& slice : slices) {
+    const uint64_t start_byte = slice.start_lba * sector_size;
+    const uint64_t size_bytes = slice.size_lba * sector_size;
     PUU_RETURN_IF_ERROR(
         WipeRange(file, start_byte, std::min(kSignatureWipeBytes, size_bytes)));
     if (size_bytes > kSignatureWipeBytes) {
@@ -407,91 +502,87 @@ StatusOr<EfiPartitionLayout> PartitionDrive(const std::filesystem::path& drive,
 
   if (::fsync(file.Get()) != 0) {
     const int error = errno;
-    return ErrnoToStatus(error, fmt::format("fsync {}", drive.string()));
+    return ErrnoToStatus(error, fmt::format("fsync {}", drive_.string()));
   }
   if (::ioctl(file.Get(), BLKRRPART) != 0) {
     const int error = errno;
-    return ErrnoToStatus(
-        error, fmt::format("reread the partition table on {}", drive.string()));
+    return ErrnoToStatus(error, fmt::format("reread the partition table on {}",
+                                            drive_.string()));
   }
-  return efi;
+  esp_layout_ = esp;
+  return absl::OkStatus();
 }
 
-StatusOr<EfiPartitionLayout> LoadPartitionLayout(
-    const std::filesystem::path& drive) {
-  PUU_ASSIGN_OR_RETURN(const UniqueFd file, OpenDrive(drive, O_RDONLY));
-  PUU_ASSIGN_OR_RETURN(const uint32_t sector_size, SectorSize(file, drive));
-
-  PUU_ASSIGN_OR_RETURN(const uint64_t disk_bytes, DriveBytes(file, drive));
-  const uint64_t disk_sectors = disk_bytes / sector_size;
-
-  std::vector<uint8_t> header(sector_size, 0);
-  PUU_RETURN_IF_ERROR(ReadAt(file, header, kPrimaryHeaderLba * sector_size));
-  if (!std::equal(kGptSignature.begin(), kGptSignature.end(), header.begin())) {
-    return NotFoundError("no GPT on {}", drive.string());
+StatusOr<std::filesystem::path> DiskLayout::SwapDevice() const {
+  if (!swap_device_.has_value()) {
+    return FailedPreconditionError("swap partition is not enabled");
   }
+  return *swap_device_;
+}
 
-  const auto header_size = ReadLe<uint32_t>(header, 12);
-  if (header_size < kHeaderSize || header_size > sector_size) {
-    return InternalError("GPT on {} has an invalid header size of {}",
-                         drive.string(), header_size);
+StatusOr<std::string_view> DiskLayout::RootUuid() const {
+  if (root_uuid_.empty()) {
+    return FailedPreconditionError(
+        "root partition UUID is unset; the root filesystem was not formatted");
   }
-  const auto stored_crc = ReadLe<uint32_t>(header, kOffCrc);
-  PutLe<uint32_t>(header, kOffCrc, 0);
-  if (Crc32(std::span<const uint8_t>(header).first(header_size)) !=
-      stored_crc) {
-    return InternalError("GPT header on {} fails its checksum", drive.string());
-  }
+  return std::string_view(root_uuid_);
+}
 
-  const auto entries_lba = ReadLe<uint64_t>(header, kOffEntriesLba);
-  const auto entry_count = ReadLe<uint32_t>(header, kOffEntryCount);
-  const auto entry_size = ReadLe<uint32_t>(header, kOffEntrySize);
-  if (entry_size < kEntrySize || entry_size > 4096 || entry_size % 8 != 0 ||
-      entry_count == 0 || entry_count > kEntryCount * 8) {
-    return InternalError("GPT on {} has an unusable entry array ({} x {})",
-                         drive.string(), entry_count, entry_size);
+StatusOr<std::optional<std::string_view>> DiskLayout::SwapUuid() const {
+  if (!swap_device_.has_value()) {
+    return std::optional<std::string_view>{};
   }
-  if (entries_lba < 2) {
-    return InternalError("GPT on {} places its entries at LBA {}",
-                         drive.string(), entries_lba);
+  if (swap_uuid_.empty()) {
+    return FailedPreconditionError(
+        "swap partition UUID is unset; the swap partition was not formatted");
   }
+  return std::optional<std::string_view>{swap_uuid_};
+}
 
-  if (entries_lba >= disk_sectors) {
-    return InternalError(
-        "GPT on {} places its entries beyond the disk (LBA {})", drive.string(),
-        entries_lba);
+StatusOr<EfiPartitionLayout> DiskLayout::EspLayout() const {
+  if (!esp_layout_.has_value()) {
+    return FailedPreconditionError(
+        "ESP partition layout is unset; the drive was not partitioned");
   }
+  return *esp_layout_;
+}
 
-  std::vector<uint8_t> entries(size_t{entry_count} * entry_size, 0);
-  PUU_RETURN_IF_ERROR(ReadAt(file, entries, entries_lba * sector_size));
-  if (Crc32(entries) != ReadLe<uint32_t>(header, kOffEntriesCrc)) {
-    return InternalError("GPT entries on {} fail their checksum",
-                         drive.string());
+StatusOr<std::string> DiskLayout::MergeFstab(std::string_view existing) const {
+  if (efi_part_uuid_.empty() || home_uuid_.empty()) {
+    return FailedPreconditionError(
+        "EFI or home partition UUID is unset; the filesystems were not "
+        "formatted");
   }
-
-  for (uint32_t index = 0; index < entry_count; ++index) {
-    const std::span<const uint8_t> entry =
-        std::span<const uint8_t>(entries).subspan(
-            static_cast<size_t>(index) * entry_size, entry_size);
-    std::array<uint8_t, 16> type_bytes{};
-    std::ranges::copy(entry.subspan(kOffTypeGuid, 16), type_bytes.begin());
-    if (EfiGuid(type_bytes) != EfiGuid::EspType()) {
+  if (swap_device_.has_value() && swap_uuid_.empty()) {
+    return FailedPreconditionError(
+        "swap partition UUID is unset; the swap partition was not formatted");
+  }
+  constexpr std::array<std::string_view, 3> kManaged = {"/", "/efi",
+                                                        "/var/home"};
+  std::string merged;
+  while (!existing.empty()) {
+    const size_t newline = existing.find('\n');
+    std::string_view line = existing.substr(0, newline);
+    existing = newline == std::string_view::npos ? std::string_view()
+                                                 : existing.substr(newline + 1);
+    if (line.ends_with('\r')) {
+      line.remove_suffix(1);
+    }
+    const std::string_view mount_point = FstabField(line, 1);
+    const std::string_view fs_type = FstabField(line, 2);
+    if (std::ranges::find(kManaged, mount_point) != kManaged.end() ||
+        fs_type == "swap") {
       continue;
     }
-    const auto start = ReadLe<uint64_t>(entry, kOffFirstLba);
-    const auto end = ReadLe<uint64_t>(entry, kOffLastLba);
-    if (start == 0 || end < start || end >= disk_sectors) {
-      return InternalError("EFI partition on {} has an invalid range",
-                           drive.string());
-    }
-    std::array<uint8_t, 16> unique_bytes{};
-    std::ranges::copy(entry.subspan(kOffUniqueGuid, 16), unique_bytes.begin());
-    return EfiPartitionLayout{.partition_number = index + 1,
-                              .start_lba = start,
-                              .size_lba = end - start + 1,
-                              .unique_guid = EfiGuid(unique_bytes)};
+    merged.append(line).push_back('\n');
   }
-  return NotFoundError("no EFI partition found on {}", drive.string());
+  merged +=
+      fmt::format("PARTUUID={} /efi vfat fmask=0077,dmask=0077,nofail 0 2\n",
+                  efi_part_uuid_);
+  merged += fmt::format("UUID={} /var/home ext4 defaults 0 2\n", home_uuid_);
+  if (swap_device_.has_value()) {
+    merged += fmt::format("UUID={} none swap defaults 0 0\n", swap_uuid_);
+  }
+  return merged;
 }
-
 }  // namespace puu
