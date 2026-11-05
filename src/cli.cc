@@ -8,8 +8,8 @@
 
 #include <argtable3.h>
 
-#include "base/status.h"
 #include "config.h"
+#include "status.h"
 
 namespace puu {
 namespace {

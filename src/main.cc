@@ -12,18 +12,18 @@
 
 #include <spdlog/spdlog.h>
 
-#include "base/secret_string.h"
-#include "base/status.h"
+#include "app.h"
 #include "cli.h"
+#include "command.h"
 #include "config.h"
-#include "engine/command.h"
-#include "engine/context.h"
-#include "engine/firmware.h"
-#include "engine/image.h"
-#include "engine/pipeline.h"
-#include "engine/util.h"
-#include "tui/app.h"
-#include "tui/logging.h"
+#include "context.h"
+#include "firmware.h"
+#include "image.h"
+#include "logging.h"
+#include "pipeline.h"
+#include "secret_string.h"
+#include "status.h"
+#include "util.h"
 
 namespace puu {
 namespace {
@@ -43,7 +43,7 @@ StatusOr<std::filesystem::path> ResolveConfigPath(const CommandLine& options) {
       "PUU_INSTALLER_CONFIG");
 }
 
-StatusOr<engine::Context> BuildContext(const CommandLine& options) {
+StatusOr<Context> BuildContext(const CommandLine& options) {
   PUU_ASSIGN_OR_RETURN(const std::filesystem::path config_path,
                        ResolveConfigPath(options));
   PUU_ASSIGN_OR_RETURN(Config config, Config::Load(config_path));
@@ -54,10 +54,10 @@ StatusOr<engine::Context> BuildContext(const CommandLine& options) {
 
   std::optional<std::filesystem::path> source_image = options.source_image;
   if (!source_image.has_value()) {
-    PUU_ASSIGN_OR_RETURN(source_image, engine::DefaultSourceImage(config));
+    PUU_ASSIGN_OR_RETURN(source_image, DefaultSourceImage(config));
   }
 
-  if (!source_image.has_value() && !engine::RunningInContainer()) {
+  if (!source_image.has_value() && !RunningInContainer()) {
     return FailedPreconditionError(
         "no local bootc source image found; expected {}/image.tar "
         "or --source-image",
@@ -67,7 +67,7 @@ StatusOr<engine::Context> BuildContext(const CommandLine& options) {
   SecretString k3s_token;
   if (options.k3s_token_file.has_value()) {
     PUU_ASSIGN_OR_RETURN(k3s_token,
-                         engine::ReadFirstSecretLine(*options.k3s_token_file));
+                         ReadFirstSecretLine(*options.k3s_token_file));
   }
 
   if (config.k3s.role == K3sRole::kAgent &&
@@ -76,15 +76,14 @@ StatusOr<engine::Context> BuildContext(const CommandLine& options) {
         "k3s agent role requires k3s.serverUrl and --k3s-token-file");
   }
 
-  engine::ImageManifest image_manifest;
+  ImageManifest image_manifest;
   if (source_image.has_value()) {
-    PUU_ASSIGN_OR_RETURN(image_manifest,
-                         engine::ImageManifest::Load(*source_image));
+    PUU_ASSIGN_OR_RETURN(image_manifest, ImageManifest::Load(*source_image));
   }
   PUU_ASSIGN_OR_RETURN(ImageRef target_imgref,
                        image_manifest.TargetImgRef(config));
 
-  engine::Context context;
+  Context context;
   context.config = std::move(config);
   context.source_image = source_image;
   context.target_imgref = std::move(target_imgref);
@@ -95,43 +94,43 @@ StatusOr<engine::Context> BuildContext(const CommandLine& options) {
   return context;
 }
 
-int RunInstaller(engine::Context context) {
-  tui::Installer installer(std::move(context));
+int RunInstaller(Context context) {
+  Installer installer(std::move(context));
 
   for (;;) {
     switch (installer.Run()) {
-      case tui::Trap::kQuit:
+      case Trap::kQuit:
         return EXIT_SUCCESS;
 
-      case tui::Trap::kReboot: {
-        engine::SyncAll();
+      case Trap::kReboot: {
+        SyncAll();
         ::reboot(RB_AUTOBOOT);
 
         std::fprintf(stderr, "puu-installer: reboot failed\n");
         return EXIT_FAILURE;
       }
 
-      case tui::Trap::kRebootFirmware: {
-        const Status status = engine::RequestRebootToFirmware();
+      case Trap::kRebootFirmware: {
+        const Status status = RequestRebootToFirmware();
         if (!status.ok()) {
           spdlog::warn("failed to set reboot to firmware setup: {}",
                        status.message());
         }
-        engine::SyncAll();
+        SyncAll();
         ::reboot(RB_AUTOBOOT);
 
         std::fprintf(stderr, "puu-installer: reboot failed\n");
         return EXIT_FAILURE;
       }
 
-      case tui::Trap::kShell: {
-        const std::filesystem::path shell = engine::DefaultShell();
-        const Status status = engine::Command::RunInteractive(shell);
+      case Trap::kShell: {
+        const std::filesystem::path shell = DefaultShell();
+        const Status status = Command::RunInteractive(shell);
         if (!status.ok()) {
           spdlog::warn("recovery shell exited: {}", status.message());
         }
 
-        installer = tui::Installer(std::move(installer).IntoContext());
+        installer = Installer(std::move(installer).IntoContext());
         break;
       }
     }
@@ -149,26 +148,25 @@ int Main(int argc, char** argv) {
       break;
   }
 
-  if (!engine::RunningAsRoot()) {
+  if (!RunningAsRoot()) {
     std::fprintf(stderr, "puu-installer: must be run as root\n");
     return EXIT_FAILURE;
   }
 
-  if (const Status status = tui::Init(); !status.ok()) {
+  if (const Status status = InitLogging(); !status.ok()) {
     std::fprintf(stderr, "puu-installer: %s\n",
                  std::string(status.message()).c_str());
     return EXIT_FAILURE;
   }
   spdlog::info("installer started");
 
-  if (const Status status = engine::EnterPrivateMountNamespace();
-      !status.ok()) {
+  if (const Status status = EnterPrivateMountNamespace(); !status.ok()) {
     std::fprintf(stderr, "puu-installer: %s\n",
                  std::string(status.message()).c_str());
     return EXIT_FAILURE;
   }
 
-  StatusOr<engine::Context> context = BuildContext(parsed.options);
+  StatusOr<Context> context = BuildContext(parsed.options);
   if (!context.ok()) {
     std::fprintf(stderr, "puu-installer: %s\n",
                  std::string(context.status().message()).c_str());

@@ -39,8 +39,8 @@
 #include <yaml-cpp/node/node.h>
 #include <yaml-cpp/node/parse.h>
 
-#include "base/status.h"
-#include "engine/util.h"
+#include "status.h"
+#include "util.h"
 
 namespace puu {
 namespace {
@@ -847,7 +847,7 @@ StatusOr<Config> Config::ParseYaml(std::string_view yaml) {
 }
 
 StatusOr<Config> Config::Load(const std::filesystem::path& path) {
-  const StatusOr<std::string> text = engine::ReadFile(path);
+  const StatusOr<std::string> text = ReadFile(path);
   if (!text.ok()) {
     return InvalidArgumentError("failed to read config {}", path.string());
   }

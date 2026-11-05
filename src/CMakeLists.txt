@@ -13,39 +13,37 @@ if(ftxui_VERSION_MAJOR)
   add_compile_definitions(FTXUI_VERSION_MAJOR=${ftxui_VERSION_MAJOR})
 endif()
 
-set(installer_core_sources
-  base/secret_string.cc
-  base/status.cc
+add_executable(puu-installer
+  app.cc
+  block.cc
   cli.cc
+  command.cc
   config.cc
-  engine/block.cc
-  engine/command.cc
-  engine/der.cc
-  engine/firmware.cc
-  engine/guid.cc
-  engine/image.cc
-  engine/k3s.cc
-  engine/partition.cc
-  engine/passwd.cc
-  engine/pipeline.cc
-  engine/progress.cc
-  engine/runner.cc
-  engine/secureboot.cc
-  engine/steps.cc
-  engine/util.cc)
-
-set(installer_tui_sources
-  tui/app.cc
-  tui/logging.cc
-  tui/timezone.cc
-  tui/widgets.cc)
-
-add_library(puu-installer-core STATIC ${installer_core_sources})
-target_include_directories(puu-installer-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(puu-installer-core PUBLIC
+  der.cc
+  firmware.cc
+  guid.cc
+  image.cc
+  k3s.cc
+  logging.cc
+  main.cc
+  partition.cc
+  passwd.cc
+  pipeline.cc
+  progress.cc
+  runner.cc
+  secret_string.cc
+  secureboot.cc
+  status.cc
+  steps.cc
+  timezone.cc
+  util.cc
+  widgets.cc)
+target_include_directories(puu-installer PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(puu-installer PRIVATE
   argtable3::argtable3
   yaml-cpp::yaml-cpp
   fmt::fmt
+  ftxui::component
   spdlog::spdlog
   nlohmann_json::nlohmann_json
   absl::base
@@ -60,8 +58,4 @@ target_link_libraries(puu-installer-core PUBLIC
   PkgConfig::UDEV
   PkgConfig::MOUNT
   Threads::Threads)
-
-add_executable(puu-installer main.cc ${installer_tui_sources})
-target_link_libraries(puu-installer PRIVATE puu-installer-core ftxui::component)
 install(TARGETS puu-installer RUNTIME)
-
