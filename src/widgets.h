@@ -31,6 +31,7 @@ struct SelectListOptions {
   const std::vector<MenuRow>* rows = nullptr;
   int* selected = nullptr;
   std::function<void()> on_enter;
+  std::function<void()> on_space;
 };
 
 // A vertical list selector: the single choice widget used by every screen.

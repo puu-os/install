@@ -21,6 +21,7 @@ partitions:
   home: 256G
 labels:
   root: root
+  swap: swap
   home: home
 image:
   targetImgRef: ""         # required unless provided by image.manifest

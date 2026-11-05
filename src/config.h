@@ -192,6 +192,7 @@ struct PartitionsConfig {
 
 struct LabelsConfig {
   VolumeLabel root;
+  VolumeLabel swap;
   VolumeLabel home;
 };
 

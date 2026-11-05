@@ -108,17 +108,18 @@ enum class Route : std::uint8_t {
   kTarget,
   kIdentity,
   kTimezone,
-  kSecureBoot,
+  kOptions,
   kReview,
   kInstall,
   kReboot,
 };
 
-enum class SecureBootAction : std::uint8_t {
-  kBack,
-  kEnroll,
-  kSkip,
+enum class OptionAction : std::uint8_t {
+  kSecureBoot,
+  kHibernate,
+  kContinue,
   kRebootFirmware,
+  kBack,
 };
 
 enum class ModalKind : std::uint8_t {
@@ -161,8 +162,8 @@ constexpr std::array<RouteInfo, 8> kRouteInfo = {{
      .footer = "Tab next field   Up/Down move   Enter continue   Esc back"},
     {.subtitle = "Set the system time zone",
      .footer = "Type to filter   Tab to list   Enter select   Esc back"},
-    {.subtitle = "Decide how the firmware trusts this system",
-     .footer = "Up/Down move   Enter select   Esc back"},
+    {.subtitle = "Choose security and power features",
+     .footer = "Up/Down move   Space toggle   Enter continue   Esc back"},
     {.subtitle = "Confirm before anything is written",
      .footer = "Up/Down move   Enter select   Esc back"},
     {.subtitle = "Installation in progress",
@@ -172,7 +173,7 @@ constexpr std::array<RouteInfo, 8> kRouteInfo = {{
 }};
 
 constexpr std::array<std::string_view, 5> kWizardSteps{
-    "Target", "Identity", "Time zone", "Secure Boot", "Review"};
+    "Target", "Identity", "Time zone", "Options", "Review"};
 
 std::optional<size_t> RailIndex(Route route) {
   constexpr auto kFirst = static_cast<size_t>(Route::kTarget);
@@ -295,7 +296,7 @@ class Installer::Impl {
   Component BuildTarget();
   Component BuildIdentity();
   Component BuildTimezone();
-  Component BuildSecureBoot();
+  Component BuildOptions();
   Component BuildReview();
   Component BuildInstall();
   Component BuildReboot();
@@ -315,12 +316,13 @@ class Installer::Impl {
   void OnDriveEnter();
   void OnIdentitySubmit();
   void OnTimezoneEnter();
-  void OnSecureBootEnter();
+  void OnOptionsEnter();
+  void OnOptionsSpace();
   void OnTick();
 
   void ResetFlow();
   void RefreshDrives();
-  void RefreshSecureBootRows();
+  void RefreshOptionsRows();
   void RefilterZones();
   [[nodiscard]] bool SetupModeOn() const;
 
@@ -376,9 +378,10 @@ class Installer::Impl {
   int zone_index_ = 0;
 
   std::optional<SetupMode> firmware_;
-  std::vector<MenuRow> secure_boot_rows_;
-  std::vector<SecureBootAction> secure_boot_actions_;
-  int secure_boot_index_ = 0;
+  bool options_initialized_ = false;
+  std::vector<MenuRow> options_rows_;
+  std::vector<OptionAction> options_actions_;
+  int options_index_ = 0;
 
   std::vector<MenuRow> review_rows_;
   int review_index_ = 0;
@@ -462,8 +465,8 @@ Trap Installer::Impl::Run() {
 Component Installer::Impl::BuildRoot() {
   Component const tab = ftxui::Container::Tab(
       Components{BuildWelcome(), BuildTarget(), BuildIdentity(),
-                 BuildTimezone(), BuildSecureBoot(), BuildReview(),
-                 BuildInstall(), BuildReboot()},
+                 BuildTimezone(), BuildOptions(), BuildReview(), BuildInstall(),
+                 BuildReboot()},
       &route_index_);
   Component const chrome =
       ftxui::Renderer(tab, [this, tab] { return RenderChrome(tab->Render()); });
@@ -523,7 +526,7 @@ Component Installer::Impl::BuildWelcome() {
             theme::Hint(),
         ftxui::text(""),
         ftxui::paragraph("This installer sets up the disk layout, the first "
-                         "user account, the time zone and Secure Boot, then "
+                         "user account, the time zone and system options, then "
                          "deploys the system image."),
         ftxui::text(""),
         menu->Render(),
@@ -557,6 +560,9 @@ void Installer::Impl::ResetFlow() {
   drive_rows_.clear();
   drive_index_ = 0;
   firmware_.reset();
+  options_initialized_ = false;
+  options_index_ = 0;
+  context_.hibernate = false;
   validation_error_.clear();
   install_error_.clear();
   install_notice_.clear();
@@ -893,88 +899,148 @@ void Installer::Impl::OnTimezoneEnter() {
   context_.config.identity.timezone = *zone;
 
   firmware_ = DetectSetupMode();
-  RefreshSecureBootRows();
-  Goto(Route::kSecureBoot);
+  if (!options_initialized_) {
+    context_.secure_boot =
+        SetupModeOn() ? SecureBootMode::kEnroll : SecureBootMode::kSkip;
+    context_.hibernate = false;
+    options_initialized_ = true;
+    options_index_ = 0;
+  }
+  RefreshOptionsRows();
+  Goto(Route::kOptions);
 }
 
 bool Installer::Impl::SetupModeOn() const {
   return firmware_.has_value() && firmware_->state == SetupMode::State::kOn;
 }
 
-void Installer::Impl::RefreshSecureBootRows() {
-  secure_boot_rows_.clear();
-  secure_boot_actions_.clear();
-  const auto add = [this](SecureBootAction action, MenuRow row) {
-    secure_boot_actions_.push_back(action);
-    secure_boot_rows_.push_back(std::move(row));
+void Installer::Impl::RefreshOptionsRows() {
+  options_rows_.clear();
+  options_actions_.clear();
+  const auto add = [this](OptionAction action, MenuRow row) {
+    options_actions_.push_back(action);
+    options_rows_.push_back(std::move(row));
   };
+
   if (SetupModeOn()) {
-    add(SecureBootAction::kEnroll, {.label = "Enable Secure Boot",
-                                    .detail = "enrol this system's own keys"});
-    add(SecureBootAction::kSkip,
-        {.label = "Continue without Secure Boot",
-         .detail = "leave the firmware keys untouched"});
+    const bool enroll = context_.secure_boot == SecureBootMode::kEnroll;
+    add(OptionAction::kSecureBoot,
+        {.label = fmt::format("[{}] Secure Boot", enroll ? 'x' : ' '),
+         .detail = "enrol this system's own keys"});
   } else {
-    add(SecureBootAction::kSkip,
-        {.label = "Continue without Secure Boot",
-         .detail = "leave the firmware keys untouched"});
-    add(SecureBootAction::kRebootFirmware,
+    context_.secure_boot = SecureBootMode::kSkip;
+    const bool off =
+        firmware_.has_value() && firmware_->state == SetupMode::State::kOff;
+    add(OptionAction::kSecureBoot,
+        {.label = "[ ] Secure Boot",
+         .detail = "enrol this system's own keys",
+         .note = off ? "Setup Mode off" : "unavailable",
+         .enabled = false});
+  }
+
+  const StatusOr<uint64_t> swap_bytes = DiskLayout::SwapBytes();
+  const StatusOr<uint64_t> min_with_swap =
+      DiskLayout::MinimumDriveBytes(context_.config, true);
+  const bool fits = swap_bytes.ok() && min_with_swap.ok() &&
+                    context_.drive_size >= *min_with_swap;
+  if (!fits) {
+    context_.hibernate = false;
+  }
+  add(OptionAction::kHibernate,
+      {.label = fmt::format("[{}] Hibernate", context_.hibernate ? 'x' : ' '),
+       .detail = swap_bytes.ok()
+                     ? fmt::format("{} swap partition instead of zram",
+                                   HumanSize(*swap_bytes))
+                     : std::string("swap partition instead of zram"),
+       .note =
+           fits ? ""
+                : (min_with_swap.ok()
+                       ? fmt::format("needs {} disk", HumanSize(*min_with_swap))
+                       : std::string("unavailable")),
+       .enabled = fits});
+
+  add(OptionAction::kContinue,
+      {.label = "Continue", .detail = "proceed to review"});
+  if (!SetupModeOn()) {
+    add(OptionAction::kRebootFirmware,
         {.label = "Reboot to firmware settings",
          .detail = "clear the keys to enter Setup Mode"});
   }
-  add(SecureBootAction::kBack,
+  add(OptionAction::kBack,
       {.label = "Back", .detail = "return to the time zone"});
-  secure_boot_index_ = 0;
 }
 
-void Installer::Impl::OnSecureBootEnter() {
-  if (secure_boot_index_ < 0 ||
-      static_cast<size_t>(secure_boot_index_) >= secure_boot_actions_.size()) {
+void Installer::Impl::OnOptionsSpace() {
+  if (options_index_ < 0 ||
+      static_cast<size_t>(options_index_) >= options_actions_.size()) {
     return;
   }
-  switch (secure_boot_actions_[static_cast<size_t>(secure_boot_index_)]) {
-    case SecureBootAction::kBack:
-      Goto(Route::kTimezone);
+  switch (options_actions_[static_cast<size_t>(options_index_)]) {
+    case OptionAction::kSecureBoot:
+      context_.secure_boot = context_.secure_boot == SecureBootMode::kEnroll
+                                 ? SecureBootMode::kSkip
+                                 : SecureBootMode::kEnroll;
+      RefreshOptionsRows();
       return;
-    case SecureBootAction::kEnroll:
-      context_.secure_boot = SecureBootMode::kEnroll;
-      Goto(Route::kReview);
+    case OptionAction::kHibernate:
+      context_.hibernate = !context_.hibernate;
+      RefreshOptionsRows();
       return;
-    case SecureBootAction::kSkip:
-      context_.secure_boot = SecureBootMode::kSkip;
-      Goto(Route::kReview);
-      return;
-    case SecureBootAction::kRebootFirmware:
-      SetTrap(Trap::kRebootFirmware);
+    case OptionAction::kContinue:
+    case OptionAction::kRebootFirmware:
+    case OptionAction::kBack:
       return;
   }
 }
 
-Component Installer::Impl::BuildSecureBoot() {
-  Component const menu =
-      SelectList({.rows = &secure_boot_rows_,
-                  .selected = &secure_boot_index_,
-                  .on_enter = [this] { OnSecureBootEnter(); }});
+void Installer::Impl::OnOptionsEnter() {
+  if (options_index_ < 0 ||
+      static_cast<size_t>(options_index_) >= options_actions_.size()) {
+    return;
+  }
+  switch (options_actions_[static_cast<size_t>(options_index_)]) {
+    case OptionAction::kSecureBoot:
+    case OptionAction::kHibernate:
+    case OptionAction::kContinue:
+      Goto(Route::kReview);
+      return;
+    case OptionAction::kRebootFirmware:
+      SetTrap(Trap::kRebootFirmware);
+      return;
+    case OptionAction::kBack:
+      Goto(Route::kTimezone);
+      return;
+  }
+}
+
+Component Installer::Impl::BuildOptions() {
+  Component const menu = SelectList({.rows = &options_rows_,
+                                     .selected = &options_index_,
+                                     .on_enter = [this] { OnOptionsEnter(); },
+                                     .on_space = [this] { OnOptionsSpace(); }});
   Component const body = ftxui::Renderer(menu, [this, menu] {
     Elements rows;
-    if (SetupModeOn()) {
-      rows.push_back(
-          ftxui::paragraph(fmt::format("{} can enrol its own Secure Boot keys.",
-                                       context_.config.branding.name.Value())));
-      rows.push_back(
-          ftxui::paragraph("This writes firmware Secure Boot variables.") |
-          theme::Caution());
-    } else {
+    rows.push_back(
+        ftxui::paragraph("Toggle options with Space, then press Enter to "
+                         "continue.") |
+        theme::Hint());
+    if (!SetupModeOn()) {
       const bool off =
           firmware_.has_value() && firmware_->state == SetupMode::State::kOff;
       rows.push_back(
-          ftxui::paragraph(off ? "Setup Mode is off; keys cannot be enrolled."
+          ftxui::paragraph(off ? "Setup Mode is off; Secure Boot keys cannot "
+                                 "be enrolled."
                                : "Firmware Setup Mode could not be detected.") |
           theme::Caution());
       if (firmware_.has_value() && !firmware_->reason.empty()) {
         rows.push_back(ftxui::paragraph(firmware_->reason) |
                        ftxui::color(theme::Danger()));
       }
+    } else if (context_.secure_boot == SecureBootMode::kEnroll) {
+      rows.push_back(ftxui::paragraph(fmt::format(
+                         "{} will enrol its own firmware Secure Boot keys.",
+                         context_.config.branding.name.Value())) |
+                     theme::Caution());
     }
     rows.push_back(ftxui::text(""));
     rows.push_back(menu->Render());
@@ -991,6 +1057,13 @@ Component Installer::Impl::BuildSecureBoot() {
 }
 
 Element Installer::Impl::RenderSummary() const {
+  const StatusOr<uint64_t> swap_bytes = DiskLayout::SwapBytes();
+  const std::string hibernate_summary =
+      context_.hibernate
+          ? (swap_bytes.ok() ? fmt::format("Enabled ({} swap partition)",
+                                           HumanSize(*swap_bytes))
+                             : std::string("Enabled"))
+          : std::string("Disabled (zram)");
   return ftxui::vbox({
       Field("Target disk", ftxui::text(context_.drive.string())),
       Field("Disk model", ftxui::text(context_.drive_label.value_or("-"))),
@@ -1011,12 +1084,13 @@ Element Installer::Impl::RenderSummary() const {
             ftxui::text(context_.secure_boot == SecureBootMode::kEnroll
                             ? "Enabled"
                             : "Disabled")),
+      Field("Hibernate", ftxui::text(hibernate_summary)),
   });
 }
 
 Component Installer::Impl::BuildReview() {
   review_rows_ = {
-      {.label = "Back", .detail = "return to Secure Boot"},
+      {.label = "Back", .detail = "return to Options"},
       {.label = "Start installation",
        .detail = "deploy the system image",
        .note = "erases the target disk"},
@@ -1024,7 +1098,7 @@ Component Installer::Impl::BuildReview() {
   Component const menu = SelectList(
       {.rows = &review_rows_, .selected = &review_index_, .on_enter = [this] {
          if (review_index_ == 0) {
-           Goto(Route::kSecureBoot);
+           Goto(Route::kOptions);
            return;
          }
          Goto(Route::kInstall);
@@ -1047,7 +1121,7 @@ Component Installer::Impl::BuildReview() {
     if (event != Event::Escape) {
       return false;
     }
-    Goto(Route::kSecureBoot);
+    Goto(Route::kOptions);
     return true;
   });
 }
@@ -1570,8 +1644,8 @@ std::string Installer::Impl::Title() const {
       return "System Identity";
     case Route::kTimezone:
       return "Select Time Zone";
-    case Route::kSecureBoot:
-      return "Secure Boot";
+    case Route::kOptions:
+      return "System Options";
     case Route::kReview:
       return "Does this look right?";
     case Route::kInstall:

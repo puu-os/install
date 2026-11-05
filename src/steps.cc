@@ -319,9 +319,33 @@ StatusOr<std::filesystem::path> SystemdBootSource() {
   return NotFoundError("systemd-boot EFI binary not found");
 }
 
-Status StepDependencies(Runner& /*runner*/) {
+Status StepDependencies(Runner& runner) {
+  const Config& config = runner.GetContext().config;
+  std::vector<KernelArg> configured_args = config.kernel_args;
+  PUU_ASSIGN_OR_RETURN(const Arch arch, HostArch());
+  const auto console = config.serial_console.find(std::string(ArchName(arch)));
+  if (console != config.serial_console.end()) {
+    configured_args.push_back(console->second);
+  }
+  for (const KernelArg& arg : configured_args) {
+    const std::string_view value = arg.Value();
+    std::string key(value.substr(0, value.find('=')));
+    std::replace(key.begin(), key.end(), '-', '_');
+    if (key == "resume" || key == "resume_offset" || key == "noresume" ||
+        key == "systemd.zram") {
+      return InvalidArgumentError(
+          "kernel argument '{}' conflicts with installer-managed swap; "
+          "use the Hibernate option instead",
+          value);
+    }
+  }
+  std::vector<std::string_view> required(kDependencies.begin(),
+                                         kDependencies.end());
+  if (runner.GetContext().hibernate) {
+    required.emplace_back("mkswap");
+  }
   std::vector<std::string> missing;
-  for (const std::string_view dependency : kDependencies) {
+  for (const std::string_view dependency : required) {
     if (!FindInPath(dependency).has_value()) {
       missing.emplace_back(dependency.data(), dependency.size());
     }
@@ -456,6 +480,20 @@ Status StepFormatRoot(Runner& runner) {
   return absl::OkStatus();
 }
 
+Status StepFormatSwap(Runner& runner) {
+  Context& context = runner.GetContext();
+  PUU_ASSIGN_OR_RETURN(DiskLayout * layout, MutableLayout(context));
+  PUU_ASSIGN_OR_RETURN(const std::filesystem::path part, layout->SwapDevice());
+  const std::string label = context.config.labels.swap.Value();
+  InstallationLogger()->info("formatting {} as swap (label {})", part.string(),
+                             label);
+  Command command("mkswap");
+  PUU_RETURN_IF_ERROR(command.Args({"-L", label, part.string()}).Run());
+  PUU_ASSIGN_OR_RETURN(std::string uuid, ProbeBlockTag(part, BlockTag::kUuid));
+  layout->SetSwapUuid(std::move(uuid));
+  return absl::OkStatus();
+}
+
 Status StepFormatHome(Runner& runner) {
   Context& context = runner.GetContext();
   PUU_ASSIGN_OR_RETURN(DiskLayout * layout, MutableLayout(context));
@@ -587,7 +625,27 @@ Status StepConfigureMounts(Runner& runner) {
     PUU_ASSIGN_OR_RETURN(existing, ReadFile(fstab));
   }
   PUU_ASSIGN_OR_RETURN(const std::string merged, layout->MergeFstab(existing));
-  return WriteFile(fstab, merged, kPublicFileMode);
+  PUU_RETURN_IF_ERROR(WriteFile(fstab, merged, kPublicFileMode));
+
+  const std::filesystem::path zram_conf =
+      deployment / "etc/systemd/zram-generator.conf.d/99-installer.conf";
+  if (context.hibernate) {
+    if (Exists(zram_conf)) {
+      std::error_code error;
+      std::filesystem::remove(zram_conf, error);
+      if (error) {
+        return FilesystemError(error,
+                               fmt::format("remove {}", zram_conf.string()));
+      }
+    }
+    return absl::OkStatus();
+  }
+
+  PUU_RETURN_IF_ERROR(CreateDirectories(zram_conf.parent_path()));
+  return WriteFile(zram_conf,
+                   "[zram0]\n"
+                   "zram-size = ceil(ram / 1024 + (ram / 1024) ^ 0.5) * 1024\n",
+                   kPublicFileMode);
 }
 
 Status StepFirstboot(Runner& runner) {
@@ -836,11 +894,13 @@ bool RequiresSecureBoot(const Context& context) {
   return context.secure_boot == SecureBootMode::kEnroll;
 }
 
+bool HasHibernate(const Context& context) { return context.hibernate; }
+
 bool HasK3s(const Context& context) { return context.config.k3s.has_value(); }
 
 bool HasSeeds(const Context& context) { return !context.config.seeds.empty(); }
 
-constexpr std::array<Step, 23> kSteps = {{
+constexpr std::array<Step, 24> kSteps = {{
     {.title = "Verify dependencies", .run = &StepDependencies},
     {.title = "Verify Secure Boot setup",
      .run = &StepSetupMode,
@@ -853,6 +913,9 @@ constexpr std::array<Step, 23> kSteps = {{
      .point_of_no_return = true},
     {.title = "Format EFI system partition", .run = &StepFormatEfi},
     {.title = "Format root filesystem", .run = &StepFormatRoot},
+    {.title = "Format swap partition",
+     .run = &StepFormatSwap,
+     .enabled = &HasHibernate},
     {.title = "Format home filesystem", .run = &StepFormatHome},
     {.title = "Mount target filesystems", .run = &StepMount},
     {.title = "Install bootc image", .run = &StepBootcInstall, .weight = 30},

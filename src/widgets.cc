@@ -70,7 +70,10 @@ class SelectListBase : public ftxui::ComponentBase {
       return Jump(static_cast<int>(options_.rows->size()) - 1, -1);
     }
     if (event == Event::Return) {
-      return Activate();
+      return Invoke(options_.on_enter);
+    }
+    if (event == Event::Character(' ')) {
+      return Invoke(options_.on_space);
     }
     return false;
   }
@@ -149,13 +152,13 @@ class SelectListBase : public ftxui::ComponentBase {
     return true;
   }
 
-  bool Activate() {
+  bool Invoke(const std::function<void()>& handler) {
     const std::vector<MenuRow>& rows = *options_.rows;
     const size_t index = static_cast<size_t>(*options_.selected);
-    if (index >= rows.size() || !rows[index].enabled || !options_.on_enter) {
+    if (index >= rows.size() || !rows[index].enabled || !handler) {
       return false;
     }
-    options_.on_enter();
+    handler();
     return true;
   }
 

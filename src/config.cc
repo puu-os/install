@@ -50,6 +50,7 @@ constexpr size_t kDigestHexBytes = 64;
 constexpr std::string_view kDigestPrefix = "sha256:";
 constexpr size_t kXfsLabelMax = 12;
 constexpr size_t kExt4LabelMax = 16;
+constexpr size_t kSwapLabelMax = 15;
 
 constexpr uint64_t kLayoutSlackBytes = uint64_t{1} << 30;
 
@@ -778,33 +779,33 @@ const auto& Sections() {
       SectionEntry{
           .key = "labels",
           .section = &Config::labels,
-          .fields = std::array{BindField<kXfsLabelMax>(
-                                   "root", &LabelsConfig::root, "root"),
-                               BindField<kExt4LabelMax>(
-                                   "home", &LabelsConfig::home, "home")}},
+          .fields =
+              std::array{
+                  BindField<kXfsLabelMax>("root", &LabelsConfig::root, "root"),
+                  BindField<kSwapLabelMax>("swap", &LabelsConfig::swap, "swap"),
+                  BindField<kExt4LabelMax>("home", &LabelsConfig::home,
+                                           "home")}},
       SectionEntry{
           .key = "image",
           .section = &Config::image,
           .fields =
-              std::array{BindField("targetImgRef", &ImageConfig::target_imgref),
-                         BindField("expectedDigest",
-                                   &ImageConfig::expected_digest),
-                         BindField<kExt4LabelMax>(
-                             "sourceLabel", &ImageConfig::source_label,
-                             "PAYLOAD"),
-                         BindField("sourceMount", &ImageConfig::source_mount,
-                                   "/run/puu-installer/payload")}},
+              std::array{
+                  BindField("targetImgRef", &ImageConfig::target_imgref),
+                  BindField("expectedDigest", &ImageConfig::expected_digest),
+                  BindField<kExt4LabelMax>(
+                      "sourceLabel", &ImageConfig::source_label, "PAYLOAD"),
+                  BindField("sourceMount", &ImageConfig::source_mount,
+                            "/run/puu-installer/payload")}},
       SectionEntry{
           .key = "identity",
           .section = &Config::identity,
           .fields =
-              std::array{BindField("keymap", &IdentityConfig::keymap, "us"),
-                         BindField("locale", &IdentityConfig::locale,
-                                   "C.UTF-8"),
-                         BindField("timezone", &IdentityConfig::timezone,
-                                   "UTC"),
-                         BindField("hostname", &IdentityConfig::hostname,
-                                   "localhost")}},
+              std::array{
+                  BindField("keymap", &IdentityConfig::keymap, "us"),
+                  BindField("locale", &IdentityConfig::locale, "C.UTF-8"),
+                  BindField("timezone", &IdentityConfig::timezone, "UTC"),
+                  BindField("hostname", &IdentityConfig::hostname,
+                            "localhost")}},
       SectionEntry{
           .key = "homed",
           .section = &Config::homed,
