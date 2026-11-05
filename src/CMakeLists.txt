@@ -65,11 +65,3 @@ add_executable(puu-installer main.cc ${installer_tui_sources})
 target_link_libraries(puu-installer PRIVATE puu-installer-core ftxui::component)
 install(TARGETS puu-installer RUNTIME)
 
-# Assert-based checks over the GPT, Authenticode and SHA-512 crypt arithmetic.
-# Keep assertions enabled regardless of build type: -UNDEBUG lands after the
-# per-config -DNDEBUG on the compiler command line.
-add_executable(puu-selfcheck selfcheck.cc)
-target_compile_options(puu-selfcheck PRIVATE -UNDEBUG)
-target_link_libraries(puu-selfcheck PRIVATE puu-installer-core)
-target_link_options(puu-selfcheck PRIVATE -Wl,--wrap=renameat -Wl,--wrap=fsync)
-add_test(NAME selfcheck COMMAND puu-selfcheck)

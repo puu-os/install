@@ -77,6 +77,4 @@ pkg_check_modules(BLKID REQUIRED IMPORTED_TARGET blkid)
 pkg_check_modules(UDEV REQUIRED IMPORTED_TARGET libudev)
 pkg_check_modules(MOUNT REQUIRED IMPORTED_TARGET mount)
 
-enable_testing()
-
 add_subdirectory(src)

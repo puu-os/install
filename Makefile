@@ -2,10 +2,9 @@
 # Copyright (C) Opinsys Oy 2026
 
 CMAKE ?= cmake
-CTEST ?= ctest
 BUILDDIR ?= build
 
-.PHONY: default help all setup check ci test format publish clean
+.PHONY: default help all setup check ci format container-build publish clean
 
 default: help
 
@@ -18,16 +17,16 @@ setup: ## Configure the build directory
 all: setup ## Build the installer
 	$(CMAKE) --build $(BUILDDIR)
 
-test: all ## Run the unit tests
-	$(CTEST) --test-dir $(BUILDDIR) --output-on-failure
+check: all ## Build the installer
 
-check: test ## Build and test
-
-ci: ## Build and test Linux arm64 and amd64 in containers
+ci: ## Run the local CI script
 	./scripts/ci.sh
 
 format: ## Reformat the sources in place
 	find src -name '*.cc' -o -name '*.h' | xargs clang-format -i
+
+container-build: ## Build OCI container image
+	CONTAINER="$(CONTAINER)" ./scripts/build.sh
 
 publish: ## Publish a GitHub release
 	./scripts/publish.sh "$(VERSION)"

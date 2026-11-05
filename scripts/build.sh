@@ -60,7 +60,7 @@ for arch in arm64 amd64; do
   if ! "${CONTAINER}" run "${run_args[@]}" "${platform_args[@]}" \
     --env "BUILDDIR=build/$arch" \
     --env "SANITIZE_BUILDDIR=build-sanitize/$arch" \
-    "$image" scripts/container-ci.sh; then
+    "$image" scripts/ci.sh; then
     printf 'CI failed for %s\n' "$platform" >&2
     status=1
   fi

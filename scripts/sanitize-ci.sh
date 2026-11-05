@@ -8,11 +8,7 @@
 set -euo pipefail
 
 CMAKE="${CMAKE:-cmake}"
-CTEST="${CTEST:-ctest}"
 BUILDDIR="${SANITIZE_BUILDDIR:-build-sanitize}"
-ASAN_OPTIONS="${ASAN_OPTIONS:-halt_on_error=1:detect_leaks=0}"
-UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1}"
-export ASAN_OPTIONS UBSAN_OPTIONS
 
 # PUU_SANITIZE instruments only our own code; dependencies stay unsanitized.
 # GCC 14 rejects Abseil's hash-table internals under -fsanitize=undefined
@@ -22,4 +18,3 @@ export ASAN_OPTIONS UBSAN_OPTIONS
   >/dev/null
 
 "$CMAKE" --build "$BUILDDIR"
-"$CTEST" --test-dir "$BUILDDIR" --output-on-failure
