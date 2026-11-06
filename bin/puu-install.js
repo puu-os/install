@@ -45,10 +45,7 @@ function resolveBinary() {
 }
 
 try {
-  execFileSync(resolveBinary(), process.argv.slice(2), {
-    stdio: 'inherit',
-    env: { ...process.env, APPIMAGE_EXTRACT_AND_RUN: '1' },
-  });
+  execFileSync(resolveBinary(), process.argv.slice(2), { stdio: 'inherit' });
 } catch (err) {
   if (typeof err.status === 'number') {
     process.exit(err.status);
