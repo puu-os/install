@@ -926,14 +926,14 @@ void Installer::Impl::RefreshOptionsRows() {
     const bool enroll = context_.secure_boot == SecureBootMode::kEnroll;
     add(OptionAction::kSecureBoot,
         {.label = fmt::format("[{}] Secure Boot", enroll ? 'x' : ' '),
-         .detail = "enrol this system's own keys"});
+         .detail = "Enroll secure boot keys"});
   } else {
     context_.secure_boot = SecureBootMode::kSkip;
     const bool off =
         firmware_.has_value() && firmware_->state == SetupMode::State::kOff;
     add(OptionAction::kSecureBoot,
         {.label = "[ ] Secure Boot",
-         .detail = "enrol this system's own keys",
+         .detail = "Enroll secure boot keys",
          .note = off ? "Setup Mode off" : "unavailable",
          .enabled = false});
   }
@@ -948,10 +948,7 @@ void Installer::Impl::RefreshOptionsRows() {
   }
   add(OptionAction::kHibernate,
       {.label = fmt::format("[{}] Hibernate", context_.hibernate ? 'x' : ' '),
-       .detail = swap_bytes.ok()
-                     ? fmt::format("{} swap partition instead of zram",
-                                   HumanSize(*swap_bytes))
-                     : std::string("swap partition instead of zram"),
+       .detail = "Enable hibernate",
        .note =
            fits ? ""
                 : (min_with_swap.ok()
