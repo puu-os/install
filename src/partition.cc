@@ -557,7 +557,7 @@ StatusOr<std::string> DiskLayout::MergeFstab(std::string_view existing) const {
     return FailedPreconditionError(
         "swap partition UUID is unset; the swap partition was not formatted");
   }
-  constexpr std::array<std::string_view, 3> kManaged = {"/", "/efi",
+  constexpr std::array<std::string_view, 3> kManaged = {"/", "/boot",
                                                         "/var/home"};
   std::string merged;
   while (!existing.empty()) {
@@ -576,9 +576,9 @@ StatusOr<std::string> DiskLayout::MergeFstab(std::string_view existing) const {
     }
     merged.append(line).push_back('\n');
   }
-  merged +=
-      fmt::format("PARTUUID={} /efi vfat fmask=0077,dmask=0077,nofail 0 2\n",
-                  efi_part_uuid_);
+  merged += fmt::format(
+      "PARTUUID={} /boot vfat fmask=0177,dmask=0077,noexec,nosuid,nodev 0 2\n",
+      efi_part_uuid_);
   merged += fmt::format("UUID={} /var/home ext4 defaults 0 2\n", home_uuid_);
   if (swap_device_.has_value()) {
     merged += fmt::format("UUID={} none swap defaults 0 0\n", swap_uuid_);
