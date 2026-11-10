@@ -346,37 +346,6 @@ Status CopyTreeEntry(const std::filesystem::path& source,
   return InvalidArgumentError("unsupported file type at {}", source.string());
 }
 
-Status CopyTreeFilesEntries(const std::filesystem::path& source,
-                            const std::filesystem::path& destination) {
-  PUU_RETURN_IF_ERROR(CreateDirectories(destination));
-  std::error_code error;
-  std::filesystem::directory_iterator entries(source, error);
-  if (error) {
-    return FilesystemError(error, fmt::format("readdir {}", source.string()));
-  }
-  const std::filesystem::directory_iterator end;
-  for (; entries != end; entries.increment(error)) {
-    if (error) {
-      return FilesystemError(error, fmt::format("readdir {}", source.string()));
-    }
-    const std::filesystem::path child = entries->path();
-    const std::filesystem::path target = destination / child.filename();
-
-    struct stat info = {};
-    if (::lstat(child.c_str(), &info) != 0) {
-      const int errno_value = errno;
-      return ErrnoToStatus(errno_value,
-                           fmt::format("lstat {}", child.string()));
-    }
-    if (S_ISDIR(info.st_mode)) {
-      PUU_RETURN_IF_ERROR(CopyTreeFilesEntries(child, target));
-      continue;
-    }
-    PUU_RETURN_IF_ERROR(CopyFile(child, target));
-  }
-  return absl::OkStatus();
-}
-
 }  // namespace
 
 Status CopyTree(const std::filesystem::path& source,
@@ -384,12 +353,6 @@ Status CopyTree(const std::filesystem::path& source,
   PUU_RETURN_IF_ERROR(RemoveTree(destination));
   HardLinkMap hard_links;
   return CopyTreeEntry(source, destination, &hard_links);
-}
-
-Status CopyTreeFiles(const std::filesystem::path& source,
-                     const std::filesystem::path& destination) {
-  PUU_RETURN_IF_ERROR(RemoveTree(destination));
-  return CopyTreeFilesEntries(source, destination);
 }
 
 Status WriteBytes(const std::filesystem::path& path,

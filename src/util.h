@@ -47,11 +47,6 @@ Status RemoveTree(const std::filesystem::path& path);
 Status CopyTree(const std::filesystem::path& source,
                 const std::filesystem::path& destination);
 
-// Copies regular files only, without extended attributes or hard-link
-// preservation. `destination` is removed first.
-Status CopyTreeFiles(const std::filesystem::path& source,
-                     const std::filesystem::path& destination);
-
 // Writes, fsyncs and chmods a file. `extra_flags` may add O_NOFOLLOW.
 Status WriteBytes(const std::filesystem::path& path,
                   std::span<const uint8_t> data, mode_t mode,
