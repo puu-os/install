@@ -31,10 +31,9 @@ std::shared_ptr<spdlog::logger> InstallationLogger();
 // Mount points owned by the installer. All live under /run so that nothing
 // survives a reboot.
 inline constexpr std::string_view kTargetMount = "/run/puu-install/target";
-inline constexpr std::string_view kTargetEfiMount =
-    "/run/puu-install/target/efi";
-inline constexpr std::string_view kTargetHomeMount =
-    "/run/puu-install/target/var/home";
+inline constexpr std::string_view kTargetDeploymentMount =
+    "/run/puu-install/deployment";
+inline constexpr std::string_view kTargetEfiMount = "/run/puu-install/esp";
 
 // Puts the process in a private mount namespace.
 //
@@ -57,8 +56,7 @@ Status Unmount(const std::filesystem::path& target);
 // Bind-mounts /proc, /sys, /dev and /run under `root`, so helpers can be run
 // chrooted there.
 //
-// `root` is the OSTree deployment directory, not the physical sysroot: only the
-// deployment has a /usr for the helper to execute from.
+// `root` is the mounted Composefs deployment, with writable /etc and /var.
 Status MountChrootBinds(const std::filesystem::path& root);
 
 // Unmounts everything the installer mounted, deepest path first.
@@ -92,6 +90,8 @@ class CleanupStack {
 StatusOr<std::vector<KernelArg>> InstallKernelArgs(const DiskLayout& layout,
                                                    const Config& config);
 
+// A read-only native Composefs image with its writable deployment /etc and
+// shared /var mounted for configuration. Mounts are owned by CleanupMounts().
 class TargetDeployment {
  public:
   [[nodiscard]] static StatusOr<TargetDeployment> Resolve(
@@ -100,15 +100,12 @@ class TargetDeployment {
   [[nodiscard]] const std::filesystem::path& Root() const { return root_; }
   [[nodiscard]] std::filesystem::path InDeployment(
       const std::filesystem::path& path) const;
-  [[nodiscard]] std::filesystem::path InState(
-      const std::filesystem::path& path) const;
 
  private:
-  TargetDeployment(std::filesystem::path root, std::filesystem::path state_root)
-      : root_(std::move(root)), state_root_(std::move(state_root)) {}
+  explicit TargetDeployment(std::filesystem::path root)
+      : root_(std::move(root)) {}
 
   std::filesystem::path root_;
-  std::filesystem::path state_root_;
 };
 
 }  // namespace puu

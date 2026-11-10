@@ -29,6 +29,7 @@
 #include <spdlog/logger.h>
 #include <spdlog/spdlog.h>
 
+#include "command.h"
 #include "config.h"
 #include "status.h"
 #include "util.h"
@@ -50,7 +51,13 @@ constexpr std::array<std::pair<std::string_view, std::string_view>, 4>
 
 StatusOr<std::vector<std::filesystem::path>> TeardownMountPoints() {
   PUU_ASSIGN_OR_RETURN(const Mounts mounts, Mounts::Read());
-  return mounts.Below(kTargetMount);
+  std::vector<std::filesystem::path> points;
+  for (const std::string_view root :
+       {kTargetDeploymentMount, kTargetEfiMount, kTargetMount}) {
+    const std::vector<std::filesystem::path> below = mounts.Below(root);
+    points.insert(points.end(), below.begin(), below.end());
+  }
+  return points;
 }
 
 Status MountContextError(libmnt_context* cxt, int rc, std::string_view action,
@@ -240,17 +247,11 @@ void CleanupStack::Release() { cleanups_.clear(); }
 
 StatusOr<std::vector<KernelArg>> InstallKernelArgs(const DiskLayout& layout,
                                                    const Config& config) {
-  PUU_ASSIGN_OR_RETURN(const std::string_view root_uuid, layout.RootUuid());
   PUU_ASSIGN_OR_RETURN(const std::optional<std::string_view> swap_uuid,
                        layout.SwapUuid());
   PUU_ASSIGN_OR_RETURN(const Arch machine, HostArch());
   std::vector<KernelArg> args;
-  args.reserve(config.kernel_args.size() + 5);
-  PUU_ASSIGN_OR_RETURN(
-      KernelArg root, KernelArg::Parse(fmt::format("root=UUID={}", root_uuid)));
-  args.push_back(std::move(root));
-  PUU_ASSIGN_OR_RETURN(KernelArg rw, KernelArg::Parse("rw"));
-  args.push_back(std::move(rw));
+  args.reserve(config.kernel_args.size() + 3);
   if (swap_uuid.has_value()) {
     PUU_ASSIGN_OR_RETURN(KernelArg resume, KernelArg::Parse(fmt::format(
                                                "resume=UUID={}", *swap_uuid)));
@@ -272,71 +273,106 @@ StatusOr<std::vector<KernelArg>> InstallKernelArgs(const DiskLayout& layout,
 
 StatusOr<TargetDeployment> TargetDeployment::Resolve(
     const std::filesystem::path& target) {
-  const std::filesystem::path deploy = target / "ostree/deploy";
+  const std::filesystem::path deploy = target / "state/deploy";
   std::error_code error;
-  std::filesystem::directory_iterator os_entries(deploy, error);
+  std::filesystem::directory_iterator entries(deploy, error);
   if (error) {
     return FilesystemError(
-        error, fmt::format("read ostree deployments at {}", deploy.string()));
+        error,
+        fmt::format("read Composefs deployments at {}", deploy.string()));
   }
 
-  std::vector<std::filesystem::path> found;
+  std::filesystem::path state;
   const std::filesystem::directory_iterator end;
-  for (; os_entries != end; os_entries.increment(error)) {
-    const std::filesystem::path directory = os_entries->path() / "deploy";
-    std::filesystem::directory_iterator deployments(directory, error);
-    if (error == std::errc::no_such_file_or_directory ||
-        error == std::errc::not_a_directory) {
-      error.clear();
-      continue;
-    }
+  for (; entries != end; entries.increment(error)) {
     if (error) {
-      return FilesystemError(error, fmt::format("read ostree deployments at {}",
-                                                directory.string()));
+      break;
     }
-    for (; deployments != end; deployments.increment(error)) {
-      const std::filesystem::path path = deployments->path();
-      const bool is_directory = deployments->is_directory(error);
-      if (error) {
-        return FilesystemError(
-            error, fmt::format("inspect ostree deployment {}", path.string()));
-      }
-      if (is_directory && !path.filename().string().ends_with(".origin")) {
-        found.push_back(path);
-      }
-    }
+    const std::filesystem::path path = entries->path();
+    const std::string id = path.filename().string();
+    const auto status = entries->symlink_status(error);
     if (error) {
-      return FilesystemError(error, fmt::format("read ostree deployments at {}",
-                                                directory.string()));
+      break;
     }
+    if (!std::filesystem::is_directory(status) || id.size() != 128 ||
+        id.find_first_not_of("0123456789abcdef") != std::string::npos) {
+      return FailedPreconditionError("invalid Composefs deployment {}",
+                                     path.string());
+    }
+    if (!state.empty()) {
+      return FailedPreconditionError(
+          "expected one fresh Composefs deployment at {}", deploy.string());
+    }
+    state = path;
   }
   if (error) {
     return FilesystemError(
-        error, fmt::format("read ostree deployments at {}", deploy.string()));
+        error,
+        fmt::format("read Composefs deployments at {}", deploy.string()));
   }
-  if (found.empty()) {
-    return NotFoundError(
-        "ostree did not report the installed deployment root under {}",
-        deploy.string());
+  if (state.empty()) {
+    return NotFoundError("no Composefs deployment at {}", deploy.string());
   }
-  if (found.size() != 1) {
-    return FailedPreconditionError(
-        "expected one installed deployment under {}, found {}", deploy.string(),
-        found.size());
+  const std::string id = state.filename().string();
+  for (const std::filesystem::path& path :
+       {state / "etc", state / (id + ".origin")}) {
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (error) {
+      return FilesystemError(error, fmt::format("inspect {}", path.string()));
+    }
+    if ((path.filename() == "etc" && !std::filesystem::is_directory(status)) ||
+        (path.filename() != "etc" &&
+         !std::filesystem::is_regular_file(status))) {
+      return FailedPreconditionError("invalid Composefs state {}",
+                                     path.string());
+    }
   }
-  std::filesystem::path root = std::move(found.front());
-  std::filesystem::path state_root = root.parent_path().parent_path();
-  return TargetDeployment(std::move(root), std::move(state_root));
+  const std::filesystem::path var =
+      std::filesystem::canonical(state / "var", error);
+  if (error) {
+    return FilesystemError(error, "resolve Composefs shared /var");
+  }
+  const std::filesystem::path shared_var =
+      std::filesystem::canonical(target / "state/os/default/var", error);
+  if (error) {
+    return FilesystemError(error, "resolve Composefs shared state");
+  }
+  if (var != shared_var) {
+    return FailedPreconditionError("Composefs deployment has unexpected /var");
+  }
+
+  const std::filesystem::path root(kTargetDeploymentMount);
+  PUU_RETURN_IF_ERROR(CreateDirectories(root));
+  Command mount("bootc");
+  PUU_RETURN_IF_ERROR(
+      mount
+          .Args({"internals", "cfs", "--repo", (target / "composefs").string(),
+                 "mount", "--fuse", "no", id, root.string()})
+          .Run());
+  PUU_ASSIGN_OR_RETURN(const Mounts mounts, Mounts::Read());
+  if (!mounts.IsMountPoint(root)) {
+    return FailedPreconditionError("bootc did not mount Composefs at {}",
+                                   root.string());
+  }
+  for (const std::string_view relative : {"etc", "var"}) {
+    const auto status = std::filesystem::symlink_status(root / relative, error);
+    if (error) {
+      return FilesystemError(error, fmt::format("inspect image /{}", relative));
+    }
+    if (!std::filesystem::is_directory(status)) {
+      return FailedPreconditionError("image /{} must be a directory", relative);
+    }
+  }
+  // Only bootc's writable state is exposed for customization. Never overlay
+  // the image root or create a second copy of its filesystem.
+  PUU_RETURN_IF_ERROR(BindMount(state / "etc", root / "etc"));
+  PUU_RETURN_IF_ERROR(BindMount(var, root / "var"));
+  return TargetDeployment(root);
 }
 
 std::filesystem::path TargetDeployment::InDeployment(
     const std::filesystem::path& path) const {
   return root_ / path.relative_path();
-}
-
-std::filesystem::path TargetDeployment::InState(
-    const std::filesystem::path& path) const {
-  return state_root_ / path.relative_path();
 }
 
 }  // namespace puu

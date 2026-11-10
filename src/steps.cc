@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -45,8 +44,8 @@
 namespace puu {
 namespace {
 
-constexpr std::array<std::string_view, 4> kDependencies = {
-    "bootc", "mke2fs", "mkfs.fat", "mkfs.xfs"};
+constexpr std::array<std::string_view, 5> kDependencies = {
+    "bootc", "bootctl", "mke2fs", "mkfs.fat", "mkfs.xfs"};
 
 constexpr std::chrono::seconds kDeviceTimeout{30};
 constexpr std::chrono::seconds kHeartbeatInterval{30};
@@ -83,7 +82,7 @@ Status MountEfi(const Runner& runner) {
   PUU_ASSIGN_OR_RETURN(const DiskLayout* layout,
                        GetLayout(runner.GetContext()));
   return MountTarget(layout->EfiDevice(), kTargetEfiMount, "vfat",
-                     "fmask=0077,dmask=0077");
+                     "fmask=0177,dmask=0077,noexec,nosuid,nodev");
 }
 
 StatusOr<uint64_t> ValidateTargetDrive(const std::filesystem::path& drive,
@@ -159,17 +158,12 @@ Status RunChrootedHelper(const Runner& runner,
   CleanupStack binds;
   binds.Push([deployment] {
     for (const std::string_view relative :
-         {"run", "dev", "sys", "proc", "var"}) {
+         {"run", "dev", "sys", "proc", "tmp"}) {
       Unmount(deployment / relative).IgnoreError();
     }
   });
-
-  // Without this the helper writes into the deployment's empty /var, which
-  // ostree-prepare-root shadows with the stateroot's /var at boot, so every
-  // change would be silently discarded.
-  const std::filesystem::path var = target->InDeployment("/var");
-  PUU_RETURN_IF_ERROR(CreateDirectories(var));
-  PUU_RETURN_IF_ERROR(BindMount(target->InState("/var"), var));
+  PUU_RETURN_IF_ERROR(MountTarget("tmpfs", deployment / "tmp", "tmpfs",
+                                  "mode=1777,nosuid,nodev"));
   PUU_RETURN_IF_ERROR(MountChrootBinds(deployment));
 
   MarkerProgress progress;
@@ -218,7 +212,7 @@ Status SeedStore(const Runner& runner, const SeedConfig& seed,
   const std::string_view name = seed.name.Value();
   if (seed.live_store.has_value() && IsDirectory(*seed.live_store)) {
     PUU_RETURN_IF_ERROR(
-        CopyTree(*seed.live_store, deployment->InState(seed.target)));
+        CopyTree(*seed.live_store, deployment->InDeployment(seed.target)));
     InstallationLogger()->info("{}: copied the store from the live image",
                                name);
     return absl::OkStatus();
@@ -252,32 +246,6 @@ Status SeedStore(const Runner& runner, const SeedConfig& seed,
       progress_base, progress_span));
   InstallationLogger()->info("{}: pre-staged", name);
   return absl::OkStatus();
-}
-
-StatusOr<std::filesystem::path> SystemdBootSource(
-    const TargetDeployment& deployment) {
-  const std::array<std::filesystem::path, 2> directories = {
-      deployment.InDeployment("/usr/lib/systemd/boot/efi"),
-      std::filesystem::path("/usr/lib/systemd/boot/efi")};
-  for (const std::filesystem::path& directory : directories) {
-    std::error_code error;
-    std::filesystem::directory_iterator entries(directory, error);
-    if (error) {
-      continue;
-    }
-    const std::filesystem::directory_iterator end;
-    for (; entries != end && !error; entries.increment(error)) {
-      std::filesystem::path path = entries->path();
-      const std::string name = path.filename().string();
-      std::string extension = path.extension().string();
-      std::ranges::transform(extension, extension.begin(),
-                             [](unsigned char c) { return std::tolower(c); });
-      if (name.starts_with("systemd-boot") && extension == ".efi") {
-        return path;
-      }
-    }
-  }
-  return NotFoundError("systemd-boot EFI binary not found");
 }
 
 Status StepDependencies(Runner& runner) {
@@ -493,6 +461,8 @@ Status StepBootcInstall(Runner& runner) {
   cleanups.Push([scratch] {
     Unmount(scratch).IgnoreError();
     RemoveTree(scratch).IgnoreError();
+    std::error_code ignored;
+    std::filesystem::remove(scratch.parent_path(), ignored);
   });
   PUU_RETURN_IF_ERROR(BindMount(scratch, kHostVarTmp));
   cleanups.Push([] { Unmount(kHostVarTmp).IgnoreError(); });
@@ -520,7 +490,11 @@ Status StepBootcInstall(Runner& runner) {
   args.push_back(context.target_imgref.Value());
   args.emplace_back("--skip-fetch-check");
   args.emplace_back("--bootloader");
-  args.emplace_back("none");
+  args.emplace_back("systemd");
+  args.emplace_back("--composefs-backend");
+  args.emplace_back("--allow-missing-verity");
+  // Keep the physical filesystem writable for /etc and /var customization.
+  // Final cleanup flushes and unmounts all target filesystems.
   args.emplace_back("--skip-finalize");
   PUU_ASSIGN_OR_RETURN(const std::vector<KernelArg> kernel_args,
                        InstallKernelArgs(*layout, context.config));
@@ -564,7 +538,10 @@ Status StepBootcInstall(Runner& runner) {
 Status StepMountHome(Runner& runner) {
   PUU_ASSIGN_OR_RETURN(const DiskLayout* layout,
                        GetLayout(runner.GetContext()));
-  return MountTarget(layout->HomeDevice(), kTargetHomeMount, "ext4", "");
+  PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
+                       runner.GetDeployment());
+  return MountTarget(layout->HomeDevice(),
+                     deployment->InDeployment("/var/home"), "ext4", "");
 }
 
 Status StepConfigureMounts(Runner& runner) {
@@ -572,10 +549,6 @@ Status StepConfigureMounts(Runner& runner) {
   PUU_ASSIGN_OR_RETURN(const DiskLayout* layout, GetLayout(context));
   PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
                        runner.GetDeployment());
-
-  for (const std::string_view relative : {"efi", "var", "var/home", "etc"}) {
-    PUU_RETURN_IF_ERROR(CreateDirectories(deployment->InDeployment(relative)));
-  }
 
   const std::filesystem::path fstab = deployment->InDeployment("/etc/fstab");
   std::string existing;
@@ -713,7 +686,8 @@ Status StepStageHomedIdentity(Runner& runner) {
 
   const std::filesystem::path& configured_path =
       context.config.homed.identity_path;
-  const std::filesystem::path target = deployment->InState(configured_path);
+  const std::filesystem::path target =
+      deployment->InDeployment(configured_path);
   PUU_RETURN_IF_ERROR(CreateDirectories(target.parent_path()));
 
   std::string text =
@@ -749,58 +723,11 @@ Status StepSeedStores(Runner& runner) {
   return absl::OkStatus();
 }
 
-Status StepInstallBootloader(Runner& runner) {
-  PUU_RETURN_IF_ERROR(MountEfi(runner));
-  PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
-                       runner.GetDeployment());
-  PUU_ASSIGN_OR_RETURN(const std::filesystem::path source,
-                       SystemdBootSource(*deployment));
-  PUU_ASSIGN_OR_RETURN(const Arch arch, HostArch());
-  const std::string suffix(ArchEfiSuffix(arch));
-  std::string upper = suffix;
-  std::ranges::transform(upper, upper.begin(),
-                         [](unsigned char c) { return std::toupper(c); });
-
-  const std::filesystem::path systemd_dir =
-      std::filesystem::path(kTargetEfiMount) / "EFI/systemd";
-  const std::filesystem::path fallback_dir =
-      std::filesystem::path(kTargetEfiMount) / "EFI/BOOT";
-  PUU_RETURN_IF_ERROR(CreateDirectories(systemd_dir));
-  PUU_RETURN_IF_ERROR(CreateDirectories(fallback_dir));
-
-  PUU_RETURN_IF_ERROR(CopyFile(
-      source, systemd_dir / fmt::format("systemd-boot{}.efi", suffix)));
-  PUU_RETURN_IF_ERROR(
-      CopyFile(source, fallback_dir / fmt::format("BOOT{}.EFI", upper)));
-  InstallationLogger()->info("installed systemd-boot on the ESP");
-  return absl::OkStatus();
-}
-
-Status StepStageEspBoot(Runner& runner) {
-  PUU_RETURN_IF_ERROR(MountEfi(runner));
-  const std::filesystem::path entries = InTarget("/boot/loader/entries");
-  const std::filesystem::path ostree = InTarget("/boot/ostree");
-  if (!IsDirectory(entries)) {
-    return NotFoundError("boot loader entries not found: {}", entries.string());
-  }
-  if (!IsDirectory(ostree)) {
-    return NotFoundError("boot ostree files not found: {}", ostree.string());
-  }
-  PUU_RETURN_IF_ERROR(CopyTreeFiles(
-      entries, std::filesystem::path(kTargetEfiMount) / "loader/entries"));
-  PUU_RETURN_IF_ERROR(CopyTreeFiles(
-      ostree, std::filesystem::path(kTargetEfiMount) / "boot/ostree"));
-
-  SyncAll();
-  InstallationLogger()->info(
-      "staged boot loader entries and ostree kernel files on ESP");
-  return absl::OkStatus();
-}
-
 Status StepSign(Runner& runner) {
+  PUU_RETURN_IF_ERROR(MountEfi(runner));
   PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
                        runner.GetDeployment());
-  KeyStore store(deployment->InState("/var/lib/sbctl"));
+  KeyStore store(deployment->InDeployment("/var/lib/sbctl"));
   PUU_RETURN_IF_ERROR(store.EnsureKeys());
   PUU_ASSIGN_OR_RETURN(const KeyPair database, store.Get(KeyKind::kDatabase));
   PUU_ASSIGN_OR_RETURN(const std::vector<std::filesystem::path> binaries,
@@ -837,7 +764,7 @@ Status StepSign(Runner& runner) {
 Status StepEnrollKeys(Runner& runner) {
   PUU_ASSIGN_OR_RETURN(const TargetDeployment* deployment,
                        runner.GetDeployment());
-  KeyStore store(deployment->InState("/var/lib/sbctl"));
+  KeyStore store(deployment->InDeployment("/var/lib/sbctl"));
   PUU_RETURN_IF_ERROR(store.EnsureKeys());
 
   Status status = store.Enroll();
@@ -855,7 +782,6 @@ Status StepEnrollKeys(Runner& runner) {
 }
 
 Status StepNvram(Runner& runner) {
-  PUU_RETURN_IF_ERROR(MountEfi(runner));
   const Context& context = runner.GetContext();
   PUU_ASSIGN_OR_RETURN(const DiskLayout* layout, GetLayout(context));
   PUU_ASSIGN_OR_RETURN(const EfiPartitionLayout esp, layout->EspLayout());
@@ -864,6 +790,7 @@ Status StepNvram(Runner& runner) {
 }
 
 Status StepFinalCleanup(Runner& /*runner*/) {
+  SyncAll();
   PUU_RETURN_IF_ERROR(CleanupMounts());
   InstallationLogger()->info("target filesystems unmounted; ready to reboot");
   return absl::OkStatus();
@@ -879,7 +806,7 @@ bool HasK3s(const Context& context) { return context.config.k3s.has_value(); }
 
 bool HasSeeds(const Context& context) { return !context.config.seeds.empty(); }
 
-constexpr std::array<Step, 24> kSteps = {{
+constexpr std::array<Step, 22> kSteps = {{
     {.title = "Verify dependencies", .run = &StepDependencies},
     {.title = "Verify Secure Boot setup",
      .run = &StepSetupMode,
@@ -909,8 +836,6 @@ constexpr std::array<Step, 24> kSteps = {{
      .run = &StepSeedStores,
      .weight = 15,
      .enabled = &HasSeeds},
-    {.title = "Install systemd-boot", .run = &StepInstallBootloader},
-    {.title = "Stage ESP boot files", .run = &StepStageEspBoot},
     {.title = "Sign EFI binaries",
      .run = &StepSign,
      .enabled = &RequiresSecureBoot},
